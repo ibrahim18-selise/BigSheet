@@ -27,6 +27,7 @@ import threading
 
 import duckdb
 
+from . import config
 from .formula import FormulaError, quote_ident, sql_string, translate
 
 RID = "__rid"
@@ -171,6 +172,7 @@ class Workbook:
             "allow_community_extensions": False,
             "extension_directory": ext_dir,
             "temp_directory": tmp_dir,
+            "memory_limit": f"{config.memory_limit_mb()}MB",
         })
         self.crypto_available = False
         ext = _httpfs_extension_path()
@@ -278,6 +280,13 @@ class Workbook:
                     pass
             self._cursors = []
         self._gen += 1
+
+    def memory_status(self):
+        """(used_mb, limit_text) for the engine."""
+        used = self.con.execute(
+            "SELECT coalesce(sum(memory_usage_bytes), 0) FROM duckdb_memory()").fetchone()[0]
+        limit = self.con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        return int(used // (1024 * 1024)), limit
 
     def interrupt_all(self):
         with self._cursor_lock:
