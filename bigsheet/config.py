@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "BigSheet"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 DEFAULT_POLICY = {
     # Allow exporting data to CSV, Excel, Parquet or JSON files.
