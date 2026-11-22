@@ -36,7 +36,12 @@ def fmt_num(v):
         return ""
     if isinstance(v, float) and v.is_integer() and abs(v) < 1e15:
         return f"{int(v):,}"
-    return format(v, ",.10g")
+    if 0 < abs(v) < 0.001:
+        return format(v, ".4g")
+    if abs(v) < 1e15:
+        text = f"{v:,.4f}".rstrip("0").rstrip(".")
+        return text if text not in ("", "-0") else "0"
+    return format(v, ",.6g")
 
 
 class GridView(QTableView):
@@ -622,6 +627,10 @@ class MainWindow(QMainWindow):
         else:
             model.reset()
         self.table.setModel(model)
+        # The column header asks "is this whole column selected?" on every repaint, which
+        # checks every row: minutes of full CPU for a selection of millions of rows. Give
+        # the header its own selection state; clicking a header still selects the column.
+        self.table.horizontalHeader().setSelectionModel(QItemSelectionModel(model, self.table))
         sel = self.table.selectionModel()
         sel.selectionChanged.connect(lambda *_: self.stats_timer.start())
         sel.currentChanged.connect(self._current_changed)
