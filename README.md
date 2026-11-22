@@ -138,6 +138,9 @@ only the current sorted and filtered view.
 * The grid shows up to about 2.1 billion rows per sheet.
 * Sorting or filtering with tens of millions of rows takes a second or two. A progress bar
   with a Cancel button appears for anything slow.
+* Memory: BigSheet uses at most a quarter of your computer's memory (between 1 GB and 8 GB) by
+  default and puts anything larger in temporary disk space. Change it in Tools, Memory limit
+  (applies after a restart). A lower limit saves memory but makes very large sorts slower.
 
 ## 6. Troubleshooting
 
