@@ -39,8 +39,11 @@ jobs:
         run: |
           chmod +x build_mac.sh
           PY=python3 ./build_mac.sh
-      - name: Self-test
-        run: ./.venv/bin/python main.py --self-test
+      - name: Self-test (source and finished app)
+        run: |
+          ./.venv/bin/python main.py --self-test
+          dist/BigSheet.app/Contents/MacOS/BigSheet --self-test | tee selftest.txt
+          grep -q "Encrypted save and reopen: ok" selftest.txt
       - name: Package
         run: ditto -c -k --keepParent dist/BigSheet.app BigSheet-mac-apple-silicon.zip
       - uses: actions/upload-artifact@v4
