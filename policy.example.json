@@ -1,0 +1,6 @@
+{
+  "allow_export": true,
+  "allow_copy": true,
+  "allow_sql": true,
+  "require_encryption": false
+}

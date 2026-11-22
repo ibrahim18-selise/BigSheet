@@ -1,0 +1,7 @@
+# Keep duckdb and duckdb-extension-httpfs on the SAME version.
+# The httpfs package supplies the OpenSSL crypto used for workbook encryption.
+duckdb==2.0.0
+duckdb-extension-httpfs==2.0.0
+PySide6>=6.7,<7
+python-calamine>=0.9,<1
+XlsxWriter>=3.2,<4
