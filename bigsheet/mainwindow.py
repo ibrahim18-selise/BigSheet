@@ -274,6 +274,7 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&Tools")
         self.a_sql = self._act(m, "SQL window...", self.open_sql, "Ctrl+Shift+Q", needs_sheet=False)
+        self._act(m, "Memory limit...", self.memory_settings, needs_sheet=False)
 
         m = mb.addMenu("&Help")
         self._act(m, "Formula help", self.formula_help, needs_sheet=False)
@@ -1415,6 +1416,53 @@ class MainWindow(QMainWindow):
 
         self.stats_runner.start(work, done, lambda _msg: None)
 
+    # ================================================================ settings
+
+    def memory_settings(self):
+        from PySide6.QtWidgets import QCheckBox, QDialogButtonBox, QFormLayout, QSpinBox
+        ram = config.total_ram_mb()
+        current = config.load_settings().get("memory_limit_mb")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Memory limit")
+        form = QFormLayout(dlg)
+        intro = QLabel("BigSheet keeps at most this much data in memory. Larger tasks use temporary "
+                       "disk space instead, so a lower limit saves memory but can make big sorts "
+                       "slower. The change applies the next time you start BigSheet.")
+        intro.setWordWrap(True)
+        form.addRow(intro)
+        if ram:
+            form.addRow("Memory in this computer", QLabel(f"{ram / 1024:.1f} GB"))
+        if self.wb:
+            used, limit = self.wb.memory_status()
+            form.addRow("In use now", QLabel(f"{used:,} MB (limit {limit})"))
+        auto = QCheckBox(f"Automatic ({config.default_memory_limit_mb() / 1024:.1f} GB, a quarter of memory)")
+        auto.setChecked(current is None)
+        spin = QSpinBox()
+        spin.setRange(1, max(2, (ram or 65536) // 1024))
+        spin.setSuffix(" GB")
+        spin.setValue(max(1, round((current or config.default_memory_limit_mb()) / 1024)))
+        spin.setEnabled(current is not None)
+        auto.toggled.connect(lambda on: spin.setEnabled(not on))
+        form.addRow("", auto)
+        form.addRow("Limit", spin)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        form.addRow(box)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        settings = config.load_settings()
+        if auto.isChecked():
+            settings.pop("memory_limit_mb", None)
+        else:
+            settings["memory_limit_mb"] = spin.value() * 1024
+        try:
+            config.save_settings(settings)
+        except OSError as e:
+            self.error(f"Could not save the setting:\n{e}")
+            return
+        self.info("Memory limit saved. Restart BigSheet to apply it.")
+
     # ================================================================== help
 
     def formula_help(self):
@@ -1426,11 +1474,15 @@ class MainWindow(QMainWindow):
 
     def about(self):
         crypto = "available" if (self.wb and self.wb.crypto_available) else "not installed"
+        memory = ""
+        if self.wb:
+            used, limit = self.wb.memory_status()
+            memory = f"Memory in use: {used:,} MB (limit {limit})<br>"
         policy = ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in self.policy.items())
         QMessageBox.about(
             self, "About BigSheet",
             f"<b>BigSheet {config.APP_VERSION}</b><br>A private spreadsheet for very large files.<br><br>"
             f"Engine: DuckDB {duckdb.__version__}<br>Workbook encryption: {crypto}<br>"
-            f"Network access: disabled<br>Policy: {policy}<br><br>"
+            f"Network access: disabled<br>{memory}Policy: {policy}<br><br>"
             f"Policy files are read from:<br>{config.user_config_dir() / 'policy.json'}<br>"
             f"{config.system_config_dir() / 'policy.json'}")
