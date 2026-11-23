@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from bigsheet import config
 from bigsheet.mainwindow import MainWindow
+from bigsheet.theme import apply_theme
 
 
 class App(QApplication):
@@ -62,6 +63,7 @@ def main():
     app.setApplicationName(config.APP_NAME)
     app.setApplicationVersion(config.APP_VERSION)
     app.setOrganizationName(config.APP_NAME)
+    apply_theme(app)
     win = MainWindow()
     app.window = win
     win.show()
