@@ -3,12 +3,13 @@
 import os
 import time
 
-from PySide6.QtCore import QItemSelectionModel, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
-                               QPushButton, QStackedWidget, QTableView, QTabBar, QToolBar,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import QItemSelectionModel, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QKeySequence
+from PySide6.QtWidgets import (QAbstractItemView, QColorDialog, QComboBox, QDialog, QFileDialog,
+                               QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
+                               QSizePolicy, QStackedWidget, QTableView, QTabBar, QToolBar,
+                               QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 import duckdb
 
@@ -17,7 +18,12 @@ from .dialogs import (EXCEL_EXT, DuplicatesDialog, FilterDialog, FormulaDialog, 
                       PasswordDialog, SaveSecurityDialog, SortDialog, SqlDialog, StatsDialog,
                       SummarizeDialog, TextDialog, TypeDialog, FORMULA_HELP)
 from .engine import EngineError, PasswordRequired, Workbook, WrongPassword, friendly_type
-from .model import Runner, SheetModel, column_letters
+from .model import (CURRENCY_SYMBOLS, DATE_FORMATS, NUMBER_FORMATS, Runner, SheetModel,
+                    column_letters, default_decimals)
+from . import theme
+from .header import FilterHeaderView, GridDelegate
+from .filterpopup import FilterPopup
+from .pivotpanel import PivotPanel
 
 WORKBOOK_EXT = (".bigsheet", ".duckdb", ".db")
 DATA_EXT = (".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".ndjson") + EXCEL_EXT
@@ -82,39 +88,50 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(4, 4, 4, 0)
-        outer.setSpacing(4)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        bar = QHBoxLayout()
+        formula_bar = QWidget()
+        formula_bar.setObjectName("FormulaBar")
+        bar = QHBoxLayout(formula_bar)
+        bar.setContentsMargins(8, 6, 8, 6)
         self.name_box = QLabel("")
+        self.name_box.setObjectName("NameBox")
         self.name_box.setMinimumWidth(170)
-        self.name_box.setStyleSheet("QLabel { border: 1px solid palette(mid); padding: 3px 6px; }")
+        fx = QLabel("fx")
+        fx.setObjectName("Fx")
         self.cell_edit = QLineEdit()
         self.cell_edit.setPlaceholderText("Cell value. Type and press Enter to change it.")
         self.cell_edit.returnPressed.connect(self._commit_cell_edit)
         self.formula_hint = QLabel("")
-        self.formula_hint.setStyleSheet("color: gray;")
+        self.formula_hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         bar.addWidget(self.name_box)
+        bar.addWidget(fx)
         bar.addWidget(self.cell_edit, 1)
         bar.addWidget(self.formula_hint)
-        outer.addLayout(bar)
+        self.formula_bar = formula_bar
+        outer.addWidget(formula_bar)
 
         self.view_bar = QWidget()
+        self.view_bar.setObjectName("ViewBar")
         vb = QHBoxLayout(self.view_bar)
-        vb.setContentsMargins(6, 2, 6, 2)
+        vb.setContentsMargins(10, 4, 8, 4)
+        filt_icon = QLabel()
+        filt_icon.setPixmap(theme.pixmap("filter", theme.ACCENT, 16))
         self.view_label = QLabel("")
         self.view_label.setWordWrap(True)
         clear_btn = QPushButton("Clear sort and filters")
         clear_btn.clicked.connect(self.clear_view)
+        vb.addWidget(filt_icon)
         vb.addWidget(self.view_label, 1)
         vb.addWidget(clear_btn)
-        self.view_bar.setStyleSheet("background: palette(alternate-base);")
         self.view_bar.hide()
         outer.addWidget(self.view_bar)
 
         self.find_bar = QWidget()
+        self.find_bar.setObjectName("FormulaBar")
         fb = QHBoxLayout(self.find_bar)
-        fb.setContentsMargins(0, 0, 0, 0)
+        fb.setContentsMargins(8, 4, 8, 4)
         self.find_edit = QLineEdit()
         self.find_edit.setPlaceholderText("Find text in this sheet (Enter = next, Shift+Enter = previous)")
         self.find_edit.returnPressed.connect(lambda: self.find(backward=False))
@@ -138,29 +155,61 @@ class MainWindow(QMainWindow):
         welcome = QWidget()
         wl = QVBoxLayout(welcome)
         wl.addStretch(1)
-        title = QLabel("<h2>BigSheet</h2>")
+        logo = QLabel()
+        logo.setPixmap(theme.pixmap("pivot", theme.ACCENT, 44))
+        logo.setAlignment(Qt.AlignCenter)
+        title = QLabel("BigSheet")
+        title.setObjectName("Title")
         title.setAlignment(Qt.AlignCenter)
-        info = QLabel("Drop a CSV, Excel, Parquet or JSON file here, or click the button below.\n"
-                      "Files of any size are converted once into a fast, private workbook.")
+        info = QLabel("A private spreadsheet for very large files. Drop a CSV, Excel, Parquet or JSON\n"
+                      "file anywhere in this window, or start with one of the options below.")
+        info.setObjectName("Subtitle")
         info.setAlignment(Qt.AlignCenter)
-        btn = QPushButton("Import a file")
-        btn.setFixedWidth(200)
-        btn.clicked.connect(self.import_dialog)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        for text, icon_name, slot, primary in (
+                ("Import a file", "import", self.import_dialog, True),
+                ("Open a workbook", "open", self.open_dialog, False),
+                ("Try sample data", "sparkle", self.load_sample, False)):
+            b = QPushButton(theme.icon(icon_name, "#ffffff" if primary else theme.TEXT), "  " + text)
+            b.setIconSize(QSize(16, 16))
+            b.setMinimumHeight(38)
+            b.setMinimumWidth(170)
+            if primary:
+                b.setProperty("primary", True)
+            b.clicked.connect(slot)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        privacy = QLabel("Everything stays on this computer. BigSheet never connects to the internet.")
+        privacy.setObjectName("Subtitle")
+        privacy.setStyleSheet("font-size: 12px;")
+        privacy.setAlignment(Qt.AlignCenter)
+        wl.addWidget(logo)
+        wl.addSpacing(6)
         wl.addWidget(title)
+        wl.addSpacing(4)
         wl.addWidget(info)
-        wl.addSpacing(12)
-        wl.addWidget(btn, alignment=Qt.AlignCenter)
+        wl.addSpacing(22)
+        wl.addLayout(buttons)
+        wl.addSpacing(18)
+        wl.addWidget(privacy)
         wl.addStretch(2)
         self.stack.addWidget(welcome)
 
         self.table = GridView(self)
+        self.col_header = FilterHeaderView(self.table)
+        self.table.setHorizontalHeader(self.col_header)
+        self.col_header.menuRequested.connect(self._open_filter_popup)
+        self.table.setItemDelegate(GridDelegate(self.table))
         self.table.setWordWrap(False)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
                                    | QAbstractItemView.AnyKeyPressed)
         vh = self.table.verticalHeader()
         vh.setSectionResizeMode(QHeaderView.Fixed)
-        vh.setDefaultSectionSize(max(22, self.table.fontMetrics().height() + 6))
+        self._row_height = max(24, self.table.fontMetrics().height() + 8)
+        vh.setDefaultSectionSize(self._row_height)
+        vh.setDefaultAlignment(Qt.AlignRight | Qt.AlignVCenter)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -171,8 +220,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.table)
         outer.addWidget(self.stack, 1)
 
-        tabs_row = QHBoxLayout()
-        tabs_row.setContentsMargins(0, 0, 0, 0)
+        tabs_widget = QWidget()
+        tabs_widget.setObjectName("TabsRow")
+        tabs_row = QHBoxLayout(tabs_widget)
+        tabs_row.setContentsMargins(6, 0, 6, 0)
         self.tabs = QTabBar()
         self.tabs.setExpanding(False)
         self.tabs.setMovable(False)
@@ -181,13 +232,17 @@ class MainWindow(QMainWindow):
         self.tabs.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabs.customContextMenuRequested.connect(self._tab_menu)
         add_tab = QToolButton()
-        add_tab.setText("+")
+        add_tab.setIcon(theme.icon("plus"))
         add_tab.setToolTip("Import a file as a new sheet")
         add_tab.clicked.connect(self.import_dialog)
         tabs_row.addWidget(add_tab)
         tabs_row.addWidget(self.tabs, 1)
-        outer.addLayout(tabs_row)
+        outer.addWidget(tabs_widget)
         self.setCentralWidget(central)
+
+        self.pivot_panel = PivotPanel(self)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.pivot_panel)
+        self.pivot_panel.hide()
 
         sb = self.statusBar()
         self.msg_label = QLabel("")
@@ -197,6 +252,7 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setFixedWidth(140)
+        self.progress.setTextVisible(False)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_task)
         sb.addWidget(self.msg_label, 1)
@@ -224,86 +280,217 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self):
         self._actions = []
+        I = theme.icon
         mb = self.menuBar()
+
         m = mb.addMenu("&File")
         self.a_new = self._act(m, "New workbook", self.new_workbook, QKeySequence.New, needs_sheet=False)
         self.a_open = self._act(m, "Open...", self.open_dialog, QKeySequence.Open, needs_sheet=False,
                                 tip="Open a workbook, or import a data file into this workbook")
+        self.a_open.setIcon(I("open"))
         self.a_import = self._act(m, "Import file...", self.import_dialog, "Ctrl+I", mutates=True,
                                   needs_sheet=False)
+        self.a_import.setIcon(I("import"))
+        self._act(m, "Add sample data", self.load_sample, mutates=True, needs_sheet=False)
         m.addSeparator()
         self.a_save = self._act(m, "Save", self.save, QKeySequence.Save, needs_sheet=False)
+        self.a_save.setIcon(I("save"))
         self.a_save_as = self._act(m, "Save as...", self.save_as, QKeySequence.SaveAs, needs_sheet=False)
         self.a_export = self._act(m, "Export sheet...", self.export_sheet, "Ctrl+E")
+        self.a_export.setIcon(I("export"))
         m.addSeparator()
         self._act(m, "Quit", self.close, QKeySequence.Quit, needs_sheet=False)
 
         m = mb.addMenu("&Edit")
         self.a_undo = self._act(m, "Undo", self.undo, QKeySequence.Undo, mutates=True)
+        self.a_undo.setIcon(I("undo"))
         self.a_redo = self._act(m, "Redo", self.redo, QKeySequence.Redo, mutates=True)
+        self.a_redo.setIcon(I("redo"))
         m.addSeparator()
         self.a_copy = self._act(m, "Copy", self.copy, QKeySequence.Copy)
         self.a_paste = self._act(m, "Paste", self.paste, QKeySequence.Paste, mutates=True)
         self.a_clear = self._act(m, "Clear cells", self.clear_cells, mutates=True)
         m.addSeparator()
         self.a_find = self._act(m, "Find...", self.show_find, QKeySequence.Find)
+        self.a_find.setIcon(I("search"))
         self._act(m, "Go to row...", self.go_to_row, "Ctrl+G")
         m.addSeparator()
-        self.a_ins = self._act(m, "Insert row above", self.insert_row_above, "Ctrl+Shift+=", mutates=True)
-        self.a_app = self._act(m, "Add row at end", self.append_row, mutates=True)
         self.a_del = self._act(m, "Delete selected rows", self.delete_rows, "Ctrl+-", mutates=True)
+        col_menu = m.addMenu("Column")
+        self._act(col_menu, "Rename column...", lambda: self.rename_column(), mutates=True)
+        self._act(col_menu, "Change column type...", lambda: self.change_type(), mutates=True)
+        self._act(col_menu, "Delete column", lambda: self.delete_column(), mutates=True)
+        m.addSeparator()
+        self._act(m, "Rename sheet...", lambda: self.sheet and self.rename_sheet(self.sheet), mutates=True)
+        self._act(m, "Duplicate sheet", lambda: self.sheet and self.duplicate_sheet(self.sheet), mutates=True)
+        self._act(m, "Delete sheet", lambda: self.sheet and self.delete_sheet(self.sheet), mutates=True)
+
+        m = mb.addMenu("&View")
+        self.a_formula_bar = self._act(m, "Formula bar", self._toggle_formula_bar, needs_sheet=False)
+        self.a_formula_bar.setCheckable(True)
+        self.a_formula_bar.setChecked(True)
+        self.a_pivot_panel = self._act(m, "Pivot panel", self.toggle_pivot_panel, needs_sheet=False)
+        self.a_pivot_panel.setCheckable(True)
+        m.addSeparator()
+        self._act(m, "Zoom in", lambda: self.zoom(1), QKeySequence.ZoomIn, needs_sheet=False)
+        self._act(m, "Zoom out", lambda: self.zoom(-1), QKeySequence.ZoomOut, needs_sheet=False)
+        self._act(m, "Actual size", lambda: self.zoom(0), "Ctrl+0", needs_sheet=False)
+
+        m = mb.addMenu("&Insert")
+        self.a_ins = self._act(m, "Row above", self.insert_row_above, "Ctrl+Shift+=", mutates=True)
+        self.a_app = self._act(m, "Row at end", self.append_row, mutates=True)
+        m.addSeparator()
+        self.a_formula = self._act(m, "Formula column...", self.add_formula, mutates=True)
+        self.a_formula.setIcon(I("fx"))
+        self._act(m, "Empty column...", self.add_empty_column, mutates=True)
+        m.addSeparator()
+        self.a_pivot = self._act(m, "Pivot table", self.insert_pivot, mutates=True)
+        self.a_pivot.setIcon(I("pivot"))
+        self._act(m, "Sheet from file...", self.import_dialog, mutates=True, needs_sheet=False)
+
+        m = mb.addMenu("F&ormat")
+        self.a_bold = self._act(m, "Bold", lambda: self.toggle_style("bold"), QKeySequence.Bold, mutates=True)
+        self.a_bold.setIcon(I("bold"))
+        self.a_bold.setCheckable(True)
+        self.a_italic = self._act(m, "Italic", lambda: self.toggle_style("italic"), QKeySequence.Italic,
+                                  mutates=True)
+        self.a_italic.setIcon(I("italic"))
+        self.a_italic.setCheckable(True)
+        num_menu = m.addMenu("Number")
+        for key, label in NUMBER_FORMATS:
+            if key == "currency":
+                for sym in CURRENCY_SYMBOLS:
+                    self._act(num_menu, f"Currency ({sym.strip()})",
+                              lambda _=False, s=sym: self.set_number_format("currency", s), mutates=True)
+            else:
+                self._act(num_menu, label, lambda _=False, k=key: self.set_number_format(k), mutates=True)
+        date_menu = m.addMenu("Date")
+        for key, label in DATE_FORMATS:
+            self._act(date_menu, label, lambda _=False, k=key: self.set_number_format(k), mutates=True)
+        self.a_dec_minus = self._act(m, "Decrease decimal places", lambda: self.change_decimals(-1), mutates=True)
+        self.a_dec_minus.setIcon(I("dec_minus"))
+        self.a_dec_plus = self._act(m, "Increase decimal places", lambda: self.change_decimals(1), mutates=True)
+        self.a_dec_plus.setIcon(I("dec_plus"))
+        m.addSeparator()
+        align_menu = m.addMenu("Align")
+        self.align_group = QActionGroup(self)
+        self.align_actions = {}
+        for key, label in (("left", "Left"), ("center", "Center"), ("right", "Right")):
+            a = self._act(align_menu, label, lambda _=False, k=key: self.set_alignment(k), mutates=True)
+            a.setIcon(I("align_" + key))
+            a.setCheckable(True)
+            self.align_group.addAction(a)
+            self.align_actions[key] = a
+        self.align_group.setExclusive(False)
+        m.addSeparator()
+        self.a_clear_format = self._act(m, "Clear formatting", self.clear_formatting, "Ctrl+\\", mutates=True)
+        self.a_clear_format.setIcon(I("clear_format"))
 
         m = mb.addMenu("&Data")
-        self.a_sort_az = self._act(m, "Sort A to Z (current column)", lambda: self.sort_current(True), mutates=True)
-        self.a_sort_za = self._act(m, "Sort Z to A (current column)", lambda: self.sort_current(False), mutates=True)
+        self.a_sort_az = self._act(m, "Sort A to Z", lambda: self.sort_current(True), mutates=True)
+        self.a_sort_az.setIcon(I("sort_az"))
+        self.a_sort_za = self._act(m, "Sort Z to A", lambda: self.sort_current(False), mutates=True)
+        self.a_sort_za.setIcon(I("sort_za"))
         self._act(m, "Custom sort...", self.custom_sort, mutates=True)
         m.addSeparator()
-        self.a_filter = self._act(m, "Filter...", self.add_filter, "Ctrl+Shift+L", mutates=True)
+        self.a_filter = self._act(m, "Filter column...", self.filter_current_column, "Ctrl+Shift+L", mutates=True)
+        self.a_filter.setIcon(I("filter"))
         self._act(m, "Filter by selected value", lambda: self.filter_by_value("eq"), mutates=True)
         self._act(m, "Hide rows with selected value", lambda: self.filter_by_value("ne"), mutates=True)
         self.a_clear_view = self._act(m, "Clear sort and filters", self.clear_view, mutates=True)
         m.addSeparator()
-        self.a_summary = self._act(m, "Summarize / pivot...", self.summarize, mutates=True)
+        self._act(m, "Group and summarize...", self.summarize, mutates=True)
         self._act(m, "Remove duplicates...", self.remove_duplicates, mutates=True)
-
-        m = mb.addMenu("&Columns")
-        self.a_formula = self._act(m, "Add formula column...", self.add_formula, mutates=True)
-        self._act(m, "Add empty column...", self.add_empty_column, mutates=True)
         self._act(m, "Recalculate formulas", self.recalc_formulas, mutates=True)
-        m.addSeparator()
-        self._act(m, "Rename column...", lambda: self.rename_column(), mutates=True)
-        self._act(m, "Change column type...", lambda: self.change_type(), mutates=True)
-        self._act(m, "Delete column", lambda: self.delete_column(), mutates=True)
         m.addSeparator()
         self._act(m, "Column statistics...", lambda: self.column_stats())
 
         m = mb.addMenu("&Tools")
         self.a_sql = self._act(m, "SQL window...", self.open_sql, "Ctrl+Shift+Q", needs_sheet=False)
+        self.a_sql.setIcon(I("sql"))
         self._act(m, "Memory limit...", self.memory_settings, needs_sheet=False)
 
         m = mb.addMenu("&Help")
         self._act(m, "Formula help", self.formula_help, needs_sheet=False)
         self._act(m, "About BigSheet", self.about, needs_sheet=False)
 
+        # ------------------------------------------------------------ toolbar
         tb = QToolBar("Main")
         tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        for a in (self.a_open, self.a_import, self.a_save, None, self.a_undo, self.a_redo, None,
-                  self.a_sort_az, self.a_sort_za, self.a_filter, self.a_clear_view, None,
-                  self.a_formula, self.a_summary, None, self.a_find, self.a_sql, self.a_export):
-            if a is None:
-                tb.addSeparator()
+        tb.setIconSize(theme.ICON_SIZE)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.setContextMenuPolicy(Qt.PreventContextMenu)
+        for a in (self.a_undo, self.a_redo):
+            tb.addAction(a)
+        tb.addSeparator()
+
+        self.numfmt_combo = QComboBox()
+        self.numfmt_combo.setToolTip("Number format")
+        self.numfmt_combo.setMinimumWidth(130)
+        for key, label in NUMBER_FORMATS:
+            if key == "currency":
+                for sym in CURRENCY_SYMBOLS:
+                    self.numfmt_combo.addItem(f"Currency ({sym.strip()})", ("currency", sym))
             else:
-                tb.addAction(a)
-        self.a_sort_az.setIconText("Sort A-Z")
-        self.a_sort_za.setIconText("Sort Z-A")
-        self.a_clear_view.setIconText("Clear filters")
-        self.a_formula.setIconText("Formula column")
-        self.a_summary.setIconText("Summarize")
-        self.a_sql.setIconText("SQL")
-        self.a_export.setIconText("Export")
-        self.a_import.setIconText("Import")
+                self.numfmt_combo.addItem(label, (key, None))
+        self.numfmt_combo.insertSeparator(self.numfmt_combo.count())
+        for key, label in DATE_FORMATS:
+            self.numfmt_combo.addItem(f"Date {label}", (key, None))
+        self.numfmt_combo.activated.connect(self._numfmt_chosen)
+        tb.addWidget(self.numfmt_combo)
+        for a in (self.a_dec_minus, self.a_dec_plus):
+            tb.addAction(a)
+        tb.addSeparator()
+        for a in (self.a_bold, self.a_italic):
+            tb.addAction(a)
+        self.text_color_btn = self._color_button("text_color", "Text color", "color")
+        self.fill_color_btn = self._color_button("fill", "Fill color", "fill")
+        tb.addWidget(self.text_color_btn)
+        tb.addWidget(self.fill_color_btn)
+        for key in ("left", "center", "right"):
+            tb.addAction(self.align_actions[key])
+        tb.addAction(self.a_clear_format)
+        tb.addSeparator()
+        for a in (self.a_filter, self.a_sort_az, self.a_sort_za):
+            tb.addAction(a)
+        tb.addSeparator()
+        for a in (self.a_formula, self.a_pivot, self.a_find, self.a_sql):
+            tb.addAction(a)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        for a in (self.a_import, self.a_export, self.a_save):
+            tb.addAction(a)
         self.addToolBar(tb)
+        self.toolbar = tb
+
+    def _color_button(self, icon_name, tip, key):
+        btn = QToolButton()
+        btn.setToolTip(tip)
+        btn.setIcon(theme.color_icon(icon_name, "#000000" if key == "color" else "#fef08a"))
+        btn.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(btn)
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(8, 8, 8, 4)
+        grid.setSpacing(4)
+        for i, color in enumerate(theme.SWATCHES):
+            sw = QToolButton()
+            sw.setFixedSize(22, 22)
+            sw.setToolTip(color)
+            sw.setStyleSheet(f"QToolButton {{ background: {color}; border: 1px solid #d5dae2; border-radius: 4px; }}"
+                             f"QToolButton:hover {{ border: 2px solid {theme.ACCENT}; }}")
+            sw.clicked.connect(lambda _=False, c=color: (menu.close(), self.set_color(key, c, btn, icon_name)))
+            grid.addWidget(sw, i // 7, i % 7)
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(grid_host)
+        menu.addAction(wa)
+        menu.addSeparator()
+        menu.addAction("Reset", lambda: self.set_color(key, None, btn, icon_name))
+        menu.addAction("Custom color...", lambda: self._custom_color(key, btn, icon_name))
+        btn.setMenu(menu)
+        btn.setProperty("mutates", True)
+        return btn
 
     # ============================================================== helpers
 
@@ -343,6 +530,8 @@ class MainWindow(QMainWindow):
         if self.wb:
             self.a_undo.setEnabled(self.a_undo.isEnabled() and bool(self.wb.undo_stack))
             self.a_redo.setEnabled(self.a_redo.isEnabled() and bool(self.wb.redo_stack))
+        for btn in (self.text_color_btn, self.fill_color_btn, self.numfmt_combo):
+            btn.setEnabled(has_sheet and not self.busy)
         self.a_export.setEnabled(self.a_export.isEnabled() and self.policy["allow_export"])
         self.a_copy.setEnabled(self.a_copy.isEnabled() and self.policy["allow_copy"])
         self.a_sql.setEnabled(self.a_sql.isEnabled() and self.policy["allow_sql"])
@@ -368,6 +557,7 @@ class MainWindow(QMainWindow):
             self.count_label.setText(f"  {v.count:,} of {v.total:,} rows  ")
             self.view_label.setText(v.describe())
             self.view_bar.show()
+        self._sync_header()
 
     # ============================================================ busy tasks
 
@@ -611,6 +801,7 @@ class MainWindow(QMainWindow):
             self.table.setModel(None)
             self.stack.setCurrentIndex(0)
             self._update_status()
+            self.pivot_panel.bind(None)
         self._update_actions()
 
     def _tab_changed(self, index):
@@ -634,22 +825,61 @@ class MainWindow(QMainWindow):
         sel = self.table.selectionModel()
         sel.selectionChanged.connect(lambda *_: self.stats_timer.start())
         sel.currentChanged.connect(self._current_changed)
+        self._current_changed(self.table.currentIndex(), None)
         self._size_columns(model)
         self._update_status()
         self._update_actions()
         self.stats_label.setText("")
         if model.rowCount() and model.columnCount():
             self.table.setCurrentIndex(model.index(0, 0))
+        if self.wb.pivot_spec(sheet) is not None and not self.pivot_panel.isVisible():
+            self.pivot_panel.show()
+        if self.pivot_panel.isVisible():
+            self.pivot_panel.bind(sheet)
+        self.a_pivot_panel.setChecked(self.pivot_panel.isVisible())
 
     def _size_columns(self, model):
         fm = self.table.fontMetrics()
         hh = self.table.horizontalHeader()
         sample = min(model.rowCount(), 60)
         for c in range(model.columnCount()):
-            width = fm.horizontalAdvance(model.cols[c][0]) + 28
-            for r in range(sample):
-                width = max(width, fm.horizontalAdvance(model.text_at(r, c)) + 16)
-            hh.resizeSection(c, max(80, min(width + 12, 340)))
+            hh.resizeSection(c, self._column_width(model, c, sample))
+
+    def _column_width(self, model, c, sample=60):
+        from PySide6.QtGui import QFontMetrics
+        bold = self.table.font()
+        bold.setBold(True)
+        width = QFontMetrics(bold).horizontalAdvance(model.cols[c][0]) + 52
+        cell_font = self.table.font()
+        style_font = model._styles[c][1]
+        if style_font is not None:
+            cell_font.setBold(style_font.bold())
+            cell_font.setItalic(style_font.italic())
+        fm = QFontMetrics(cell_font)
+        n = model.rowCount()
+        rows = set(range(min(n, sample)))
+        for start in (n // 2, max(0, n - sample)):
+            rows.update(range(start, min(n, start + sample // 2)))
+        top = self.table.rowAt(0)
+        if top >= 0:
+            rows.update(range(top, min(n, top + sample)))
+        for r in rows:
+            width = max(width, fm.horizontalAdvance(model.display_at(r, c)) + 22)
+        return max(90, min(width, 360))
+
+    def _grow_columns(self, names):
+        """Widen columns whose formatted contents no longer fit (never narrows them)."""
+        m = self.model
+        if not m:
+            return
+        hh = self.table.horizontalHeader()
+        index = {n: i for i, (n, _) in enumerate(m.cols)}
+        for name in names:
+            c = index.get(name)
+            if c is not None:
+                need = self._column_width(m, c)
+                if need > hh.sectionSize(c):
+                    hh.resizeSection(c, need)
 
     def _tab_menu(self, pos):
         i = self.tabs.tabAt(pos)
@@ -904,6 +1134,9 @@ class MainWindow(QMainWindow):
             self.cell_edit.setText("")
             self.formula_hint.setText("")
             return
+        self.col_header.current = current.column()
+        self.col_header.viewport().update()
+        self._sync_format_controls()
         name, typ = m.cols[current.column()]
         self.name_box.setText(f"{column_letters(current.column())}{current.row() + 1:,}  {name}")
         self.name_box.setToolTip(f"Type: {friendly_type(typ)}")
@@ -1424,6 +1657,220 @@ class MainWindow(QMainWindow):
             self.stats_label.setText("   ".join(parts) + "   ")
 
         self.stats_runner.start(work, done, lambda _msg: None)
+
+    # ============================================================ header and filters
+
+    def _sync_header(self):
+        m = self.model
+        h = self.col_header
+        if not m or not self.wb:
+            h.filtered, h.sorts, h.formula_cols = set(), {}, set()
+        else:
+            v = self.wb.view(self.sheet)
+            index = {name: i for i, (name, _) in enumerate(m.cols)}
+            h.filtered = {index[f["col"]] for f in v.filters if f["col"] in index}
+            h.sorts = {index[c]: a for c, a in v.sorts if c in index}
+            h.formula_cols = {index[c] for c in m.formulas if c in index}
+        h.viewport().update()
+
+    def _open_filter_popup(self, logical, pos):
+        m = self.model
+        if not m or self.busy or logical >= len(m.cols):
+            return
+        self.table.setCurrentIndex(m.index(max(self.table.currentIndex().row(), 0), logical))
+        name, typ = m.cols[logical]
+        popup = FilterPopup(self, self.sheet, name, typ)
+        screen = self.screen().availableGeometry()
+        x = min(pos.x(), screen.right() - popup.width() - 8)
+        y = min(pos.y(), screen.bottom() - popup.height() - 8)
+        popup.move(max(screen.left(), x), max(screen.top(), y))
+        popup.show()
+
+    def filter_current_column(self):
+        idx = self.table.currentIndex()
+        if not self.model or not idx.isValid():
+            self.error("Click a cell in the column you want to filter.")
+            return
+        c = idx.column()
+        r = self.col_header.button_rect(c)
+        self._open_filter_popup(c, self.col_header.viewport().mapToGlobal(r.bottomLeft()))
+
+    def set_column_filter(self, col, new_filter):
+        v = self.wb.view(self.sheet)
+        filters = [f for f in v.filters if f["col"] != col]
+        if new_filter:
+            filters.append(new_filter)
+        self._apply_view_async(self.sheet, v.sorts, filters, "Filtering")
+
+    def sort_by(self, col, ascending):
+        v = self.wb.view(self.sheet)
+        self._apply_view_async(self.sheet, [(col, ascending)], v.filters, "Sorting")
+
+    # ================================================================ formatting
+
+    def _selected_columns(self):
+        m = self.model
+        if not m:
+            return []
+        cols = set()
+        for _, _, left, right in self._ranges():
+            cols.update(range(left, right + 1))
+        return [m.cols[c][0] for c in sorted(cols) if c < len(m.cols)]
+
+    def _current_format(self):
+        m = self.model
+        idx = self.table.currentIndex()
+        if not m or not idx.isValid():
+            return {}, "VARCHAR"
+        name, typ = m.cols[idx.column()]
+        return m.formats.get(name, {}), typ
+
+    def apply_format(self, updates):
+        cols = self._selected_columns()
+        if not cols or self.busy:
+            return
+        try:
+            self.wb.set_column_format(self.sheet, cols, updates)
+        except EngineError as e:
+            self.error(str(e))
+            return
+        self.model.reload_formats()
+        self._grow_columns(cols)
+        self._sync_format_controls()
+
+    def toggle_style(self, key):
+        fmt, _ = self._current_format()
+        self.apply_format({key: None if fmt.get(key) else True})
+
+    def set_number_format(self, numfmt, symbol=None):
+        updates = {"numfmt": None if numfmt == "general" else numfmt, "decimals": None}
+        if numfmt == "currency":
+            updates["symbol"] = symbol or "$"
+        self.apply_format(updates)
+
+    def _numfmt_chosen(self, index):
+        data = self.numfmt_combo.itemData(index)
+        if data:
+            self.set_number_format(data[0], data[1])
+
+    def change_decimals(self, delta):
+        fmt, typ = self._current_format()
+        numfmt = fmt.get("numfmt", "general")
+        if numfmt == "general" or numfmt.startswith("date"):
+            numfmt = "number"
+        d = fmt.get("decimals")
+        if d is None:
+            d = default_decimals(numfmt, typ)
+        self.apply_format({"numfmt": numfmt, "decimals": max(0, min(10, d + delta))})
+
+    def set_alignment(self, key):
+        fmt, _ = self._current_format()
+        self.apply_format({"align": None if fmt.get("align") == key else key})
+
+    def set_color(self, key, color, button=None, icon_name=None):
+        self.apply_format({key: color})
+        if button is not None and color:
+            button.setIcon(theme.color_icon(icon_name, color))
+
+    def _custom_color(self, key, button, icon_name):
+        fmt, _ = self._current_format()
+        start = QColor(fmt.get(key) or ("#000000" if key == "color" else "#ffffff"))
+        c = QColorDialog.getColor(start, self, "Choose a color")
+        if c.isValid():
+            self.set_color(key, c.name(), button, icon_name)
+
+    def clear_formatting(self):
+        cols = self._selected_columns()
+        if not cols:
+            return
+        self.wb.clear_column_format(self.sheet, cols)
+        self.model.reload_formats()
+        self._sync_format_controls()
+
+    def _sync_format_controls(self):
+        fmt, _ = self._current_format()
+        self.a_bold.setChecked(bool(fmt.get("bold")))
+        self.a_italic.setChecked(bool(fmt.get("italic")))
+        for key, a in self.align_actions.items():
+            a.setChecked(fmt.get("align") == key)
+        numfmt = fmt.get("numfmt", "general")
+        want = (numfmt, fmt.get("symbol", "$") if numfmt == "currency" else None)
+        for i in range(self.numfmt_combo.count()):
+            if self.numfmt_combo.itemData(i) == want:
+                self.numfmt_combo.setCurrentIndex(i)
+                break
+
+    # ================================================================ view
+
+    def _toggle_formula_bar(self):
+        self.formula_bar.setVisible(self.a_formula_bar.isChecked())
+
+    def zoom(self, step):
+        size = self.table.font().pointSizeF()
+        base = QGuiApplication.font().pointSizeF()
+        new = base if step == 0 else max(8.0, min(24.0, size + step))
+        f = self.table.font()
+        f.setPointSizeF(new)
+        self.table.setFont(f)
+        self.col_header.setFont(f)
+        self.table.verticalHeader().setFont(f)
+        self.table.verticalHeader().setDefaultSectionSize(max(22, self.table.fontMetrics().height() + 8))
+        if self.model:
+            self._size_columns(self.model)
+
+    def toggle_pivot_panel(self):
+        if self.pivot_panel.isVisible():
+            self.pivot_panel.hide()
+        else:
+            self.pivot_panel.bind(self.sheet)
+            self.pivot_panel.show()
+        self.a_pivot_panel.setChecked(self.pivot_panel.isVisible())
+
+    # ================================================================ pivots
+
+    def insert_pivot(self):
+        if not self.sheet or self.busy:
+            return
+        if self.wb.pivot_spec(self.sheet) is not None:
+            self.pivot_panel.bind(self.sheet)
+            self.pivot_panel.show()
+            return
+        source = self.sheet
+
+        def done(name):
+            self.after_sheets_changed(select=name)
+            self.pivot_panel.bind(name)
+            self.pivot_panel.show()
+            self.a_pivot_panel.setChecked(True)
+            self.info("Drag fields into Rows and Values in the pivot panel.")
+
+        self.run_task("Creating pivot table", self.wb.create_pivot, done, None, source)
+
+    def update_pivot(self, sheet, spec):
+        if not sheet:
+            return
+
+        def done(_):
+            self.pivot_panel.status.setText("")
+            if self.sheet == sheet and self.model:
+                self.model.reset()
+                self._size_columns(self.model)
+                self._update_status()
+                if self.model.rowCount() and self.model.columnCount():
+                    self.table.setCurrentIndex(self.model.index(0, 0))
+                self._current_changed(self.table.currentIndex(), None)
+
+        def fail(msg):
+            self.pivot_panel.status.setText(msg)
+
+        self.run_task("Updating pivot table", self.wb.update_pivot, done, fail, sheet, spec)
+
+    def load_sample(self):
+        if self.busy or not self.wb:
+            return
+        self.run_task("Creating sample data", self.wb.create_sample_sheet,
+                      lambda name: (self.after_sheets_changed(select=name),
+                                    self.info("Added 1,000,000 rows of made-up sales data.")), None)
 
     # ================================================================ settings
 
