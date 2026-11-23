@@ -9,7 +9,7 @@ COPY (
   SELECT range + 1 AS order_id,
          'Customer ' || (range % 250000) AS customer,
          ['Dhaka', 'Chattogram', 'Sylhet', 'Khulna', 'Rajshahi', 'Barishal'][(range % 6) + 1] AS city,
-         ['Electronics', 'Grocery', 'Clothing', 'Books', 'Home'][(hash(range) % 5) + 1] AS category,
+         ['Electronics', 'Grocery', 'Clothing', 'Books', 'Home'][(hash(range) % 5)::INT + 1] AS category,
          round(random() * 5000, 2) AS amount,
          (random() * 20)::INT + 1 AS quantity,
          DATE '2021-01-01' + (range % 1800)::INT AS order_date
