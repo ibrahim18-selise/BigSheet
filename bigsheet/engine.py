@@ -15,6 +15,7 @@ back on. Workbooks can be encrypted with AES (key derived from a password).
 """
 
 import csv
+import json
 import datetime as dt
 import decimal
 import os
@@ -64,16 +65,19 @@ FILTER_OPS = [
     ("not_empty", "is not empty"),
 ]
 FILTER_OP_LABELS = dict(FILTER_OPS)
+FILTER_OP_LABELS.update({"in": "is one of", "not_in": "is not one of"})
 NO_VALUE_OPS = {"empty", "not_empty"}
+LIST_OPS = {"in", "not_in"}
 
 AGGREGATES = [
     ("count", "Count of rows"),
-    ("count_distinct", "Count of unique"),
+    ("count_distinct", "Unique count"),
     ("sum", "Sum"),
     ("avg", "Average"),
     ("min", "Minimum"),
     ("max", "Maximum"),
     ("median", "Median"),
+    ("count_values", "Count of values"),
 ]
 
 
@@ -151,7 +155,13 @@ class ViewState:
                 f"{c} ({'A to Z' if a else 'Z to A'})" for c, a in self.sorts))
         for f in self.filters:
             label = FILTER_OP_LABELS.get(f["op"], f["op"])
-            value = "" if f["op"] in NO_VALUE_OPS else f' "{f["value"]}"'
+            if f["op"] in LIST_OPS:
+                n = len(f.get("values") or []) + (1 if f.get("blanks") and f["op"] == "in" else 0)
+                value = f" {n:,} value{'s' if n != 1 else ''}"
+            elif f["op"] in NO_VALUE_OPS:
+                value = ""
+            else:
+                value = f' "{f["value"]}"'
             parts.append(f"{f['col']} {label}{value}")
         return "; ".join(parts)
 
@@ -244,6 +254,9 @@ class Workbook:
         c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}sheets (name VARCHAR, ord INTEGER)")
         c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}formulas "
                   "(sheet VARCHAR, col VARCHAR, formula VARCHAR, is_sql BOOLEAN)")
+        c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}formats "
+                  "(sheet VARCHAR, col VARCHAR, fmt VARCHAR)")
+        c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}pivots (sheet VARCHAR, spec VARCHAR)")
         self._repair_tables()
 
     def cursor(self):
@@ -407,6 +420,14 @@ class Workbook:
         self._exec(f"ALTER TABLE {self.t(old)} RENAME TO {quote_ident(new)}")
         self._exec(f"UPDATE wb.main.{META_PREFIX}sheets SET name = ? WHERE name = ?", [new, old])
         self._exec(f"UPDATE wb.main.{META_PREFIX}formulas SET sheet = ? WHERE sheet = ?", [new, old])
+        self._exec(f"UPDATE wb.main.{META_PREFIX}formats SET sheet = ? WHERE sheet = ?", [new, old])
+        self._exec(f"UPDATE wb.main.{META_PREFIX}pivots SET sheet = ? WHERE sheet = ?", [new, old])
+        for sheet_name, spec in self._exec(f"SELECT sheet, spec FROM wb.main.{META_PREFIX}pivots").fetchall():
+            data = json.loads(spec)
+            if data.get("source") == old:
+                data["source"] = new
+                self._exec(f"UPDATE wb.main.{META_PREFIX}pivots SET spec = ? WHERE sheet = ?",
+                           [json.dumps(data), sheet_name])
         if old in self.views:
             self.views[new] = self.views.pop(old)
         self._clear_undo()
@@ -416,6 +437,8 @@ class Workbook:
         self._exec(f"DROP TABLE {self.t(sheet)}")
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}sheets WHERE name = ?", [sheet])
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formulas WHERE sheet = ?", [sheet])
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ?", [sheet])
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}pivots WHERE sheet = ?", [sheet])
         self.views.pop(sheet, None)
         self._clear_undo()
 
@@ -426,6 +449,9 @@ class Workbook:
         self._exec(
             f"INSERT INTO wb.main.{META_PREFIX}formulas SELECT ?, col, formula, is_sql "
             f"FROM wb.main.{META_PREFIX}formulas WHERE sheet = ?", [name, sheet])
+        self._exec(
+            f"INSERT INTO wb.main.{META_PREFIX}formats SELECT ?, col, fmt "
+            f"FROM wb.main.{META_PREFIX}formats WHERE sheet = ?", [name, sheet])
         return name
 
     def create_sheet_from_query(self, name, query, params=None):
@@ -544,7 +570,24 @@ class Workbook:
             v.count = self._exec(f"SELECT count(*) FROM scratch.main.{quote_ident(v.table)}").fetchone()[0]
         return v
 
-    def _where(self, sheet, filters, alias=""):
+    def _where(self, sheet, filters, alias="", inline=False):
+        """WHERE clause for filters. With inline=True values are written as SQL literals."""
+        sql, params = self._where_params(sheet, filters, alias)
+        if not inline or not params:
+            return sql, params
+        pieces = sql.split("?")
+        if len(pieces) != len(params) + 1:
+            raise EngineError("A column name contains a question mark, which this filter cannot use.")
+        out = pieces[0]
+        for value, rest in zip(params, pieces[1:]):
+            if isinstance(value, list):
+                lit = "[" + ", ".join(sql_string(v) for v in value) + "]::VARCHAR[]"
+            else:
+                lit = sql_string(value)
+            out += lit + rest
+        return out, []
+
+    def _where_params(self, sheet, filters, alias=""):
         if not filters:
             return "", []
         types = dict(self.columns(sheet))
@@ -557,7 +600,24 @@ class Workbook:
             typ = types[col]
             c = pre + quote_ident(col)
             text = f"lower(CAST({c} AS VARCHAR))"
-            if op == "empty":
+            if op in LIST_OPS:
+                values = [str(x) for x in (f.get("values") or [])]
+                blanks = bool(f.get("blanks"))
+                listed = f"CAST({c} AS VARCHAR) IN (SELECT unnest(?::VARCHAR[]))"
+                if op == "in":
+                    parts = []
+                    if values:
+                        parts.append(listed)
+                        params.append(values)
+                    if blanks:
+                        parts.append(f"{c} IS NULL")
+                    clauses.append("(" + " OR ".join(parts) + ")" if parts else "false")
+                else:
+                    cond = f"NOT ({listed})" if values else "true"
+                    if values:
+                        params.append(values)
+                    clauses.append(f"({c} IS NULL OR {cond})" if blanks else f"({c} IS NOT NULL AND {cond})")
+            elif op == "empty":
                 clauses.append(f"({c} IS NULL OR CAST({c} AS VARCHAR) = '')")
             elif op == "not_empty":
                 clauses.append(f"({c} IS NOT NULL AND CAST({c} AS VARCHAR) <> '')")
@@ -589,7 +649,7 @@ class Workbook:
         return " WHERE " + " AND ".join(clauses), params
 
     def validate_filter_value(self, sheet, col, op, value):
-        if op in NO_VALUE_OPS or op in ("contains", "not_contains", "starts", "ends"):
+        if op in NO_VALUE_OPS or op in LIST_OPS or op in ("contains", "not_contains", "starts", "ends"):
             return
         typ = self.column_type(sheet, col)
         if typ.upper() == "VARCHAR":
@@ -651,6 +711,136 @@ class Workbook:
         v = self.view(sheet)
         v.sorts, v.filters = [], []
         self.refresh_counts(sheet)
+
+    def distinct_values(self, sheet, col, filters=None, search=None, limit=1000):
+        """Values of a column with row counts, for the column filter list.
+
+        Respects the other filters of the view (as Excel does). Returns
+        (rows, truncated) where rows are (text or None, count) in value order.
+        """
+        other = [f for f in (filters or []) if f["col"] != col]
+        where, params = self._where(sheet, other)
+        q = quote_ident(col)
+        cond = ""
+        if search:
+            cond = (" AND " if where else " WHERE ") + f"contains(lower(CAST({q} AS VARCHAR)), lower(?))"
+            params = params + [search]
+        rows = self._exec(
+            f"SELECT CAST({q} AS VARCHAR), count(*) FROM {self.t(sheet)}{where}{cond} "
+            f"GROUP BY {q} ORDER BY {q} NULLS FIRST LIMIT {int(limit) + 1}", params).fetchall()
+        return rows[:limit], len(rows) > limit
+
+    # ---------------------------------------------------------------- formats
+
+    def column_formats(self, sheet):
+        rows = self._exec(f"SELECT col, fmt FROM wb.main.{META_PREFIX}formats WHERE sheet = ?",
+                          [sheet]).fetchall()
+        out = {}
+        for col, fmt in rows:
+            try:
+                out[col] = json.loads(fmt)
+            except ValueError:
+                pass
+        return out
+
+    def set_column_format(self, sheet, cols, updates):
+        """Merge format settings into columns. A value of None removes that setting."""
+        current = self.column_formats(sheet)
+        for col in cols:
+            fmt = dict(current.get(col, {}))
+            for key, value in updates.items():
+                if value is None:
+                    fmt.pop(key, None)
+                else:
+                    fmt[key] = value
+            self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ? AND col = ?", [sheet, col])
+            if fmt:
+                self._exec(f"INSERT INTO wb.main.{META_PREFIX}formats VALUES (?, ?, ?)",
+                           [sheet, col, json.dumps(fmt)])
+
+    def clear_column_format(self, sheet, cols):
+        for col in cols:
+            self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ? AND col = ?", [sheet, col])
+
+    # ----------------------------------------------------------------- pivots
+
+    def pivot_spec(self, sheet):
+        row = self._exec(f"SELECT spec FROM wb.main.{META_PREFIX}pivots WHERE sheet = ?", [sheet]).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _pivot_query(self, spec):
+        source = spec["source"]
+        if not self._table_exists(source):
+            raise EngineError(f"The source sheet {source} no longer exists.")
+        types = dict(self.columns(source))
+        rows = [c for c in spec.get("rows", []) if c in types]
+        pcol = next((c for c in spec.get("columns", []) if c in types), None)
+        values = [(f, c) for f, c in spec.get("values", []) if f == "count" or c in types]
+        where, params = self._where(source, spec.get("filters") or [], inline=True)
+        src = f"(SELECT * FROM {self.t(source)}{where})"
+        if not values and not rows:
+            return "SELECT 'Add fields to Rows and Values in the pivot panel' AS \"Pivot table\"", []
+        if not values:
+            values = [("count", None)]
+        return self._summary_query(src, rows, values, pcol), params
+
+    def create_pivot(self, source, spec=None, name=None):
+        spec = dict(spec or {})
+        spec["source"] = source
+        spec.setdefault("rows", [])
+        spec.setdefault("columns", [])
+        spec.setdefault("values", [])
+        query, params = self._pivot_query(spec)
+        new = self.create_sheet_from_query(name or f"Pivot of {source}", query, params)
+        self._exec(f"INSERT INTO wb.main.{META_PREFIX}pivots VALUES (?, ?)", [new, json.dumps(spec)])
+        return new
+
+    def update_pivot(self, sheet, spec):
+        """Rebuild a pivot sheet in place from a (changed) spec."""
+        old = self.pivot_spec(sheet) or {}
+        spec = dict(spec)
+        spec["source"] = spec.get("source") or old.get("source")
+        query, params = self._pivot_query(spec)
+        self._exec(f"CREATE OR REPLACE TABLE {self.t(sheet)} AS SELECT row_number() OVER () - 1 AS {RID}, * "
+                   f"FROM ({query})", params)
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}pivots WHERE sheet = ?", [sheet])
+        self._exec(f"INSERT INTO wb.main.{META_PREFIX}pivots VALUES (?, ?)", [sheet, json.dumps(spec)])
+        self._format_pivot(sheet, spec)
+        self.reset_view(sheet)
+        self._clear_undo()
+
+    def _format_pivot(self, sheet, spec):
+        """Give pivot value columns a readable number format (copied from the source column if set)."""
+        grouping = set(spec.get("rows", [])) | set(spec.get("columns", []))
+        src_formats = self.column_formats(spec["source"]) if self._table_exists(spec["source"]) else {}
+        values = spec.get("values") or []
+        template = {}
+        if values:
+            func, col = values[0]
+            if func in ("sum", "avg", "min", "max", "median") and col in src_formats:
+                template = {k: v for k, v in src_formats[col].items()
+                            if k in ("numfmt", "symbol", "decimals") and not str(v).startswith("date")}
+        self.clear_column_format(sheet, [c for c, _ in self.columns(sheet)])
+        for col, typ in self.columns(sheet):
+            if col in grouping or not is_numeric(typ):
+                continue
+            fmt = dict(template) if template else {"numfmt": "number"}
+            if typ.upper() in ("BIGINT", "INTEGER", "HUGEINT", "SMALLINT", "TINYINT", "UBIGINT"):
+                fmt.setdefault("decimals", 0)
+            self.set_column_format(sheet, [col], fmt)
+
+    def create_sample_sheet(self, rows=1_000_000):
+        """A sheet of made-up sales data to try BigSheet with."""
+        query = f"""
+            SELECT range + 1 AS order_id,
+                   'Customer ' || (range % 25000 + 1) AS customer,
+                   ['Dhaka', 'Chattogram', 'Sylhet', 'Khulna', 'Rajshahi', 'Barishal'][(range % 6) + 1] AS city,
+                   ['Electronics', 'Grocery', 'Clothing', 'Books', 'Home'][(hash(range) % 5)::INT + 1] AS category,
+                   round(((hash(range * 7) % 500000)::INT / 100.0) + 1, 2) AS amount,
+                   (hash(range * 13) % 20)::INT + 1 AS quantity,
+                   DATE '2023-01-01' + (range % 1000)::INT AS order_date
+            FROM range({int(rows)}) ORDER BY range"""
+        return self.create_sheet_from_query("Sample sales", query)
 
     # ---------------------------------------------------------------- reading
 
@@ -906,6 +1096,8 @@ class Workbook:
         self._exec(f"ALTER TABLE {self.t(sheet)} RENAME COLUMN {quote_ident(old)} TO {quote_ident(new)}")
         self._exec(f"UPDATE wb.main.{META_PREFIX}formulas SET col = ? WHERE sheet = ? AND col = ?",
                    [new, sheet, old])
+        self._exec(f"UPDATE wb.main.{META_PREFIX}formats SET col = ? WHERE sheet = ? AND col = ?",
+                   [new, sheet, old])
         v = self.view(sheet)
         v.sorts = [(new if c == old else c, a) for c, a in v.sorts]
         for f in v.filters:
@@ -921,6 +1113,7 @@ class Workbook:
         used = any(c == col for c, _ in v.sorts) or any(f["col"] == col for f in v.filters)
         self._exec(f"ALTER TABLE {self.t(sheet)} DROP COLUMN {quote_ident(col)}")
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formulas WHERE sheet = ? AND col = ?", [sheet, col])
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ? AND col = ?", [sheet, col])
         if used:
             v.sorts = [(c, a) for c, a in v.sorts if c != col]
             v.filters = [f for f in v.filters if f["col"] != col]
@@ -1022,11 +1215,9 @@ class Workbook:
         idxs = [i for i, f in enumerate(flags) if f]
         return pos, (max(idxs) if backward else min(idxs)), wrapped
 
-    def summarize(self, sheet, group_cols, aggs, pivot_col=None, use_view=True, name=None):
-        """Group-by summary (optionally pivoted) into a new sheet."""
+    def _summary_query(self, src, group_cols, aggs, pivot_col=None):
         if not aggs:
             raise EngineError("Choose at least one value to calculate.")
-        src = self._rows_source(sheet) if use_view else self.t(sheet)
         labels = dict(AGGREGATES)
         agg_sql, needed = [], set()
         for func, col in aggs:
@@ -1037,8 +1228,8 @@ class Workbook:
                 needed.add(col)
                 expr = {"count_distinct": f"count(DISTINCT {q})", "sum": f"sum({q})",
                         "avg": f"avg({q})", "min": f"min({q})", "max": f"max({q})",
-                        "median": f"median({q})"}[func]
-                alias = f"{labels[func]} of {col}"
+                        "median": f"median({q})", "count_values": f"count({q})"}[func]
+                alias = f"{labels.get(func, func)} of {col}"
             agg_sql.append(f"{expr} AS {quote_ident(alias)}")
         groups = ", ".join(quote_ident(g) for g in group_cols)
         if pivot_col:
@@ -1048,14 +1239,22 @@ class Workbook:
                                   "Pivot columns work best with 200 or fewer.")
             keep = list(dict.fromkeys(list(group_cols) + [pivot_col] + sorted(needed)))
             inner = f"SELECT {', '.join(quote_ident(k) for k in keep)} FROM {src}"
-            query = f"PIVOT ({inner}) ON {quote_ident(pivot_col)} USING {', '.join(agg_sql)}"
+            using = agg_sql
+            if len(agg_sql) == 1:
+                using = [agg_sql[0].rsplit(" AS ", 1)[0]]  # columns named after the pivot values only
+            query = f"PIVOT ({inner}) ON {quote_ident(pivot_col)} USING {', '.join(using)}"
             if group_cols:
                 query += f" GROUP BY {groups} ORDER BY {groups} NULLS LAST"
-        elif group_cols:
-            query = (f"SELECT {groups}, {', '.join(agg_sql)} FROM {src} "
-                     f"GROUP BY {groups} ORDER BY {groups} NULLS LAST")
-        else:
-            query = f"SELECT {', '.join(agg_sql)} FROM {src}"
+            return query
+        if group_cols:
+            return (f"SELECT {groups}, {', '.join(agg_sql)} FROM {src} "
+                    f"GROUP BY {groups} ORDER BY {groups} NULLS LAST")
+        return f"SELECT {', '.join(agg_sql)} FROM {src}"
+
+    def summarize(self, sheet, group_cols, aggs, pivot_col=None, use_view=True, name=None):
+        """Group-by summary (optionally pivoted) into a new sheet."""
+        src = self._rows_source(sheet) if use_view else self.t(sheet)
+        query = self._summary_query(src, group_cols, aggs, pivot_col)
         return self.create_sheet_from_query(name or f"{sheet} summary", query)
 
     def remove_duplicates(self, sheet, cols=None, name=None):
