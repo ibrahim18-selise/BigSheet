@@ -7,6 +7,7 @@ from collections import OrderedDict
 
 from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QObject, QRunnable, Qt,
                             QThreadPool, Signal)
+from PySide6.QtGui import QColor, QFont
 
 from .engine import EngineError, friendly_type, is_numeric
 
@@ -30,6 +31,80 @@ def format_value(v):
     if isinstance(v, (dt.date, dt.time)):
         return v.isoformat()
     return str(v)
+
+
+NUMBER_FORMATS = [
+    ("general", "Automatic"),
+    ("number", "Number"),
+    ("currency", "Currency"),
+    ("percent", "Percent"),
+    ("scientific", "Scientific"),
+]
+DATE_FORMATS = [
+    ("date_iso", "2024-01-31"),
+    ("date_dmy", "31.01.2024"),
+    ("date_dmy_slash", "31/01/2024"),
+    ("date_mdy", "01/31/2024"),
+    ("date_long", "31 Jan 2024"),
+]
+CURRENCY_SYMBOLS = ["$", "\u20ac", "\u00a3", "\u09f3", "\u20b9", "CHF "]
+_DATE_PATTERNS = {"date_iso": "%Y-%m-%d", "date_dmy": "%d.%m.%Y", "date_dmy_slash": "%d/%m/%Y",
+                  "date_mdy": "%m/%d/%Y", "date_long": "%d %b %Y"}
+_INT_TYPES = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
+              "UINTEGER", "UBIGINT")
+
+
+def default_decimals(numfmt, col_type):
+    if numfmt == "percent":
+        return 1
+    if numfmt in ("currency", "scientific"):
+        return 2
+    return 0 if col_type.upper() in _INT_TYPES else 2
+
+
+def make_formatter(fmt, col_type):
+    """A function turning a cell value into display text for a column format."""
+    numfmt = fmt.get("numfmt", "general")
+    if numfmt in _DATE_PATTERNS:
+        pattern = _DATE_PATTERNS[numfmt]
+
+        def fmt_date(v):
+            if isinstance(v, (dt.date, dt.datetime)):
+                text = v.strftime(pattern)
+                if isinstance(v, dt.datetime) and (v.hour or v.minute or v.second):
+                    text += v.strftime(" %H:%M:%S")
+                return text
+            return format_value(v)
+        return fmt_date
+    if numfmt == "general":
+        def fmt_general(v):
+            if isinstance(v, float) and v == v and not v.is_integer():
+                return "%.12g" % v
+            return format_value(v)
+        return fmt_general
+    d = fmt.get("decimals")
+    if d is None:
+        d = default_decimals(numfmt, col_type)
+    d = max(0, min(int(d), 10))
+    symbol = fmt.get("symbol", "$")
+
+    def fmt_num(v):
+        if v is None or isinstance(v, bool):
+            return format_value(v)
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return format_value(v)
+        if numfmt == "number":
+            return f"{x:,.{d}f}"
+        if numfmt == "currency":
+            return ("-" if x < 0 else "") + f"{symbol}{abs(x):,.{d}f}"
+        if numfmt == "percent":
+            return f"{x * 100:,.{d}f}%"
+        if numfmt == "scientific":
+            return f"{x:.{d}E}"
+        return format_value(v)
+    return fmt_num
 
 
 def column_letters(index):
@@ -59,6 +134,38 @@ class SheetModel(QAbstractTableModel):
         self.numeric = [is_numeric(t) for _, t in self.cols]
         self.formulas = self.wb.formulas(self.sheet)
         self.count = self.wb.view(self.sheet).count
+        self._load_formats()
+
+    def _load_formats(self):
+        try:
+            self.formats = self.wb.column_formats(self.sheet)
+        except EngineError:
+            self.formats = {}
+        self._styles = []
+        aligns = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}
+        for i, (name, typ) in enumerate(self.cols):
+            fmt = self.formats.get(name, {})
+            font = None
+            if fmt.get("bold") or fmt.get("italic"):
+                font = QFont()
+                font.setBold(bool(fmt.get("bold")))
+                font.setItalic(bool(fmt.get("italic")))
+            fg = QColor(fmt["color"]) if fmt.get("color") else None
+            bg = QColor(fmt["fill"]) if fmt.get("fill") else None
+            h = aligns.get(fmt.get("align"))
+            if h is None:
+                h = Qt.AlignRight if self.numeric[i] else Qt.AlignLeft
+            self._styles.append((make_formatter(fmt, typ), font, fg, bg, int(h | Qt.AlignVCenter)))
+
+    def reload_formats(self):
+        self._load_formats()
+        self.refresh_data()
+
+    def display_at(self, row, col):
+        vals = self.row_values(row)
+        if vals is None or col >= len(vals):
+            return ""
+        return self._styles[col][0](vals[col])
 
     # ---------------------------------------------------------------- refresh
 
@@ -126,12 +233,20 @@ class SheetModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        if role in (Qt.DisplayRole, Qt.EditRole):
-            return self.text_at(index.row(), index.column())
+        c = index.column()
+        if role == Qt.DisplayRole:
+            return self.display_at(index.row(), c)
+        if role == Qt.EditRole:
+            return self.text_at(index.row(), c)
+        style = self._styles[c]
         if role == Qt.TextAlignmentRole:
-            if self.numeric[index.column()]:
-                return int(Qt.AlignRight | Qt.AlignVCenter)
-            return int(Qt.AlignLeft | Qt.AlignVCenter)
+            return style[4]
+        if role == Qt.FontRole:
+            return style[1]
+        if role == Qt.ForegroundRole:
+            return style[2]
+        if role == Qt.BackgroundRole:
+            return style[3]
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
