@@ -182,3 +182,60 @@ def test_save_plain(wb, tmpdir_path):
     again = Workbook(path)
     assert again.sheets() == ["sales"] and again.row_total("sales") == 1000
     again.close()
+
+
+def test_value_list_filters_and_distinct(wb):
+    vals, truncated = wb.distinct_values("sales", "city")
+    assert [v for v, _ in vals] == ["Chattogram", "Dhaka", "Sylhet"] and not truncated
+    assert dict(vals)["Dhaka"] == 333
+    f_in = {"col": "city", "op": "in", "values": ["Dhaka", "Sylhet"]}
+    t, c = wb.prepare_view("sales", [], [f_in])
+    assert c == 666
+    wb.set_cells("sales", "city", [0], [""])  # make one blank
+    f_not = {"col": "city", "op": "not_in", "values": ["Dhaka"], "blanks": False}
+    t, c = wb.prepare_view("sales", [], [f_not])
+    assert c == 1000 - 333 - 1  # Dhaka rows and the blank row excluded
+    f_blank = {"col": "city", "op": "in", "values": [], "blanks": True}
+    t, c = wb.prepare_view("sales", [], [f_blank])
+    assert c == 1
+    nums, _ = wb.distinct_values("sales", "qty", filters=[f_in])
+    assert [v for v, _ in nums][:3] == ["0", "1", "2"]  # numeric order, not text order
+    some, _ = wb.distinct_values("sales", "city", search="dha")
+    assert [v for v, _ in some] == ["Dhaka"]
+
+
+def test_column_formats(wb, tmpdir_path):
+    wb.set_column_format("sales", ["price", "qty"], {"bold": True, "numfmt": "currency", "symbol": "$"})
+    wb.set_column_format("sales", ["price"], {"bold": None, "decimals": 1})
+    f = wb.column_formats("sales")
+    assert f["price"] == {"numfmt": "currency", "symbol": "$", "decimals": 1}
+    assert f["qty"]["bold"] is True
+    wb.rename_column("sales", "price", "unit price")
+    assert "unit price" in wb.column_formats("sales")
+    copy = wb.duplicate_sheet("sales")
+    assert wb.column_formats(copy)["qty"]["bold"] is True
+    wb.clear_column_format("sales", ["qty"])
+    assert "qty" not in wb.column_formats("sales")
+
+
+def test_pivot_sheets(wb):
+    p = wb.create_pivot("sales")
+    assert wb.columns(p)[0][0] == "Pivot table"
+    wb.update_pivot(p, {"rows": ["city"], "columns": [], "values": [["sum", "price"], ["count", None]]})
+    _, rows = wb.fetch(p, 0, 10)
+    assert len(rows) == 3 and rows[0][0] == "Chattogram"
+    assert [c for c, _ in wb.columns(p)] == ["city", "Sum of price", "Count of rows"]
+    wb.update_pivot(p, {"rows": ["qty"], "columns": ["city"], "values": [["sum", "price"]],
+                        "filters": [{"col": "city", "op": "in", "values": ["Dhaka", "Sylhet"]}]})
+    assert len(wb.columns(p)) == 3 and wb.row_total(p) == 7
+    assert wb.pivot_spec(p)["source"] == "sales"
+    wb.rename_sheet("sales", "sales 2024")
+    assert wb.pivot_spec(p)["source"] == "sales 2024"
+    wb.update_pivot(p, wb.pivot_spec(p))  # still works after the rename
+
+
+def test_sample_sheet():
+    book = Workbook()
+    name = book.create_sample_sheet(rows=5000)
+    assert book.row_total(name) == 5000 and len(book.columns(name)) == 7
+    book.close()
