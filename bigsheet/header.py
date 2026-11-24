@@ -22,6 +22,7 @@ class FilterHeaderView(QHeaderView):
         self.setSectionResizeMode(QHeaderView.Interactive)
         self.setMinimumSectionSize(60)
         self.setMouseTracking(True)
+        self.filter_mode = False  # filter buttons shown on every column
         self.filtered = set()     # column indexes with a filter
         self.sorts = {}           # column index: ascending
         self.formula_cols = set()  # column indexes holding formulas
@@ -69,6 +70,9 @@ class FilterHeaderView(QHeaderView):
         btn = self.button_rect(logical)
         btn.moveLeft(rect.right() - BUTTON - 4)
         btn.moveTop(rect.bottom() - BUTTON - 4)
+        show_button = self.filter_mode or logical in self.filtered
+        if not show_button:
+            btn.moveLeft(rect.right() + 2)  # the name can use the full width
         text_left = rect.left() + 8
         if logical in self.formula_cols:
             fx = QFont(self.font())
@@ -96,21 +100,31 @@ class FilterHeaderView(QHeaderView):
                 tri = QPolygonF([QPointF(x, cy - 3), QPointF(x + 7, cy - 3), QPointF(x + 3.5, cy + 3)])
             painter.drawPolygon(tri)
 
-        # Dropdown or filter button.
+        # Dropdown or filter button (only while filtering is on).
+        if not show_button:
+            painter.restore()
+            return
         filtered = logical in self.filtered
         if filtered or logical == self._hover_button:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(theme.ACCENT_SOFT if filtered else theme.HOVER))
             painter.drawRoundedRect(btn, 4, 4)
         icon_name = "filter" if filtered else "caret"
+        if not filtered and logical != self._hover_button:
+            painter.setPen(QPen(QColor("#c9d0da"), 1))
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawRoundedRect(btn.adjusted(0, 0, -1, -1), 4, 4)
         color = theme.ACCENT if filtered else theme.TEXT_MUTED
         pm = theme.pixmap(icon_name, color, 14)
         painter.drawPixmap(btn.left() + (BUTTON - 14) // 2, btn.top() + (BUTTON - 14) // 2, pm)
         painter.restore()
 
+    def _has_button(self, logical):
+        return self.filter_mode or logical in self.filtered
+
     def mousePressEvent(self, event):
         logical = self.logicalIndexAt(event.position().toPoint())
-        if logical >= 0 and self.button_rect(logical).contains(event.position().toPoint()):
+        if logical >= 0 and self._has_button(logical) and self.button_rect(logical).contains(event.position().toPoint()):
             r = self.button_rect(logical)
             self.menuRequested.emit(logical, self.viewport().mapToGlobal(QPoint(r.left(), r.bottom() + 4)))
             return
@@ -118,7 +132,8 @@ class FilterHeaderView(QHeaderView):
 
     def mouseMoveEvent(self, event):
         logical = self.logicalIndexAt(event.position().toPoint())
-        over = logical if logical >= 0 and self.button_rect(logical).contains(event.position().toPoint()) else -1
+        over = (logical if logical >= 0 and self._has_button(logical)
+                and self.button_rect(logical).contains(event.position().toPoint()) else -1)
         if over != self._hover_button:
             self._hover_button = over
             self.setCursor(Qt.PointingHandCursor if over >= 0 else Qt.ArrowCursor)
