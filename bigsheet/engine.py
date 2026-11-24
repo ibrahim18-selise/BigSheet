@@ -327,6 +327,8 @@ class Workbook:
         c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}formats "
                   "(sheet VARCHAR, col VARCHAR, fmt VARCHAR)")
         c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}pivots (sheet VARCHAR, spec VARCHAR)")
+        c.execute(f"CREATE TABLE IF NOT EXISTS wb.main.{META_PREFIX}fills "
+                  "(sheet VARCHAR, rid BIGINT, col VARCHAR, fill VARCHAR)")
         self._repair_tables()
 
     def cursor(self):
@@ -491,6 +493,7 @@ class Workbook:
         self._exec(f"UPDATE wb.main.{META_PREFIX}sheets SET name = ? WHERE name = ?", [new, old])
         self._exec(f"UPDATE wb.main.{META_PREFIX}formulas SET sheet = ? WHERE sheet = ?", [new, old])
         self._exec(f"UPDATE wb.main.{META_PREFIX}formats SET sheet = ? WHERE sheet = ?", [new, old])
+        self._exec(f"UPDATE wb.main.{META_PREFIX}fills SET sheet = ? WHERE sheet = ?", [new, old])
         self._exec(f"UPDATE wb.main.{META_PREFIX}pivots SET sheet = ? WHERE sheet = ?", [new, old])
         for sheet_name, spec in self._exec(f"SELECT sheet, spec FROM wb.main.{META_PREFIX}pivots").fetchall():
             data = json.loads(spec)
@@ -508,6 +511,7 @@ class Workbook:
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}sheets WHERE name = ?", [sheet])
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formulas WHERE sheet = ?", [sheet])
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ?", [sheet])
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}fills WHERE sheet = ?", [sheet])
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}pivots WHERE sheet = ?", [sheet])
         self.views.pop(sheet, None)
         self._clear_undo()
@@ -522,6 +526,9 @@ class Workbook:
         self._exec(
             f"INSERT INTO wb.main.{META_PREFIX}formats SELECT ?, col, fmt "
             f"FROM wb.main.{META_PREFIX}formats WHERE sheet = ?", [name, sheet])
+        self._exec(
+            f"INSERT INTO wb.main.{META_PREFIX}fills SELECT ?, rid, col, fill "
+            f"FROM wb.main.{META_PREFIX}fills WHERE sheet = ?", [name, sheet])
         return name
 
     def create_sheet_from_query(self, name, query, params=None):
@@ -940,6 +947,46 @@ class Workbook:
         for col in cols:
             self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ? AND col = ?", [sheet, col])
 
+    # ------------------------------------------------------------ row and cell fill
+
+    def set_fills(self, sheet, rids, cols, color):
+        """Colour whole rows (cols=None) or cells (rid x col). color=None removes the colour."""
+        f = f"wb.main.{META_PREFIX}fills"
+        rids = [int(r) for r in rids]
+        targets = [""] if cols is None else list(cols)
+        for col in targets:
+            self._exec(f"DELETE FROM {f} WHERE sheet = ? AND col = ? AND rid IN (SELECT unnest(?::BIGINT[]))",
+                       [sheet, col, rids])
+            if color:
+                self._exec(f"INSERT INTO {f} SELECT ?, unnest(?::BIGINT[]), ?, ?", [sheet, rids, col, color])
+
+    def clear_fills(self, sheet, rids, cols):
+        """Remove row and cell colours from these rows (all columns when cols is None)."""
+        f = f"wb.main.{META_PREFIX}fills"
+        if rids is None:  # whole columns
+            self._exec(f"DELETE FROM {f} WHERE sheet = ? AND col IN (SELECT unnest(?::VARCHAR[]))",
+                       [sheet, list(cols or [])])
+            return
+        rids = [int(r) for r in rids]
+        if cols is None:
+            self._exec(f"DELETE FROM {f} WHERE sheet = ? AND rid IN (SELECT unnest(?::BIGINT[]))", [sheet, rids])
+        else:
+            self._exec(f"DELETE FROM {f} WHERE sheet = ? AND (col = '' OR col IN (SELECT unnest(?::VARCHAR[]))) "
+                       f"AND rid IN (SELECT unnest(?::BIGINT[]))", [sheet, list(cols), rids])
+
+    def has_fills(self, sheet):
+        return self._exec(f"SELECT count(*) > 0 FROM wb.main.{META_PREFIX}fills WHERE sheet = ?",
+                          [sheet]).fetchone()[0]
+
+    def fills_for(self, sheet, rids):
+        """{(rid, col): colour} for these rows; col is '' for a whole-row colour."""
+        if not rids:
+            return {}
+        rows = self._exec(f"SELECT rid, col, fill FROM wb.main.{META_PREFIX}fills "
+                          f"WHERE sheet = ? AND rid BETWEEN ? AND ? AND rid IN (SELECT unnest(?::BIGINT[]))",
+                          [sheet, min(rids), max(rids), list(rids)]).fetchall()
+        return {(r, c): fill for r, c, fill in rows}
+
     # ----------------------------------------------------------------- pivots
 
     def pivot_spec(self, sheet):
@@ -1170,6 +1217,8 @@ class Workbook:
         else:
             start = int(before_rid)
             self._exec(f"UPDATE {self.t(sheet)} SET {RID} = {RID} + ? WHERE {RID} >= ?", [count, start])
+            self._exec(f"UPDATE wb.main.{META_PREFIX}fills SET rid = rid + ? WHERE sheet = ? AND rid >= ?",
+                       [count, sheet, start])
         self._exec(f"INSERT INTO {self.t(sheet)} ({RID}) SELECT range FROM range(?, ?)",
                    [start, start + count])
         self._clear_undo()
@@ -1192,6 +1241,14 @@ class Workbook:
 
     def _renumber(self, sheet):
         t = self.t(sheet)
+        has_fills = self._exec(f"SELECT count(*) FROM wb.main.{META_PREFIX}fills WHERE sheet = ?",
+                               [sheet]).fetchone()[0]
+        if has_fills:
+            f = f"wb.main.{META_PREFIX}fills"
+            self._exec(f"DELETE FROM {f} WHERE sheet = ? AND rid NOT IN (SELECT {RID} FROM {t})", [sheet])
+            self._exec(
+                f"UPDATE {f} SET rid = m.nr FROM (SELECT {RID} AS old, row_number() OVER (ORDER BY {RID}) - 1 AS nr "
+                f"FROM {t}) m WHERE {f}.sheet = ? AND {f}.rid = m.old AND m.old <> m.nr", [sheet])
         self._exec(
             f"UPDATE {t} SET {RID} = m.nr FROM (SELECT {RID} AS old, "
             f"row_number() OVER (ORDER BY {RID}) - 1 AS nr FROM {t}) m "
@@ -1278,6 +1335,8 @@ class Workbook:
                    [new, sheet, old])
         self._exec(f"UPDATE wb.main.{META_PREFIX}formats SET col = ? WHERE sheet = ? AND col = ?",
                    [new, sheet, old])
+        self._exec(f"UPDATE wb.main.{META_PREFIX}fills SET col = ? WHERE sheet = ? AND col = ?",
+                   [new, sheet, old])
         v = self.view(sheet)
         v.sorts = [(new if c == old else c, a) for c, a in v.sorts]
         for f in v.filters:
@@ -1294,6 +1353,7 @@ class Workbook:
         self._exec(f"ALTER TABLE {self.t(sheet)} DROP COLUMN {quote_ident(col)}")
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formulas WHERE sheet = ? AND col = ?", [sheet, col])
         self._exec(f"DELETE FROM wb.main.{META_PREFIX}formats WHERE sheet = ? AND col = ?", [sheet, col])
+        self._exec(f"DELETE FROM wb.main.{META_PREFIX}fills WHERE sheet = ? AND col = ?", [sheet, col])
         if used:
             v.sorts = [(c, a) for c, a in v.sorts if c != col]
             v.filters = [f for f in v.filters if f["col"] != col]
