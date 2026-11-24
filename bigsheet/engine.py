@@ -117,6 +117,76 @@ def friendly_type(col_type):
     return t.lower()
 
 
+_CURRENCY = re.compile(r"^(?:[$\u20ac\u00a3\u09f3\u20b9]|CHF|USD|EUR|GBP|BDT|INR|TK)\s*|\s*(?:[$\u20ac\u00a3\u09f3\u20b9]|CHF|USD|EUR|GBP|BDT|INR|TK)$",
+                       re.IGNORECASE)
+_DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%d %b %Y",
+                 "%d %B %Y", "%b %d %Y", "%B %d %Y", "%b %d, %Y", "%B %d, %Y", "%Y%m%d", "%d.%m.%y", "%d/%m/%y")
+_TIME_FORMATS = ("", " %H:%M", " %H:%M:%S", "T%H:%M:%S", " %H:%M:%S.%f", "T%H:%M:%S.%f")
+
+
+def normalize_value(col_type, text):
+    """Turn what a person types into a value DuckDB understands for this column type.
+
+    Accepts thousands separators, decimal commas, currency symbols, percentages and the
+    common date styles. Returns the text unchanged when it is not recognised.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return s
+    t = col_type.upper()
+    if t in NUMERIC_TYPES or t.startswith("DECIMAL"):
+        x = s.replace("\u00a0", "").replace(" ", "").replace("'", "")
+        negative = x.startswith("(") and x.endswith(")")
+        if negative:
+            x = x[1:-1]
+        x = _CURRENCY.sub("", x)
+        percent = x.endswith("%")
+        if percent:
+            x = x[:-1]
+        if "," in x and "." in x:
+            if x.rfind(",") > x.rfind("."):
+                x = x.replace(".", "").replace(",", ".")
+            else:
+                x = x.replace(",", "")
+        elif "," in x:
+            parts = x.split(",")
+            if len(parts) > 2 or (len(parts[-1]) == 3 and len(parts[0].lstrip("-+")) <= 3):
+                x = x.replace(",", "")
+            else:
+                x = x.replace(",", ".")
+        elif x.count(".") > 1:
+            x = x.replace(".", "")
+        try:
+            value = float(x)
+        except ValueError:
+            return s
+        if negative:
+            value = -value
+        if percent:
+            value /= 100
+        if t in NUMERIC_TYPES and t not in ("FLOAT", "DOUBLE", "REAL") and value.is_integer():
+            return str(int(value))
+        return repr(value)
+    if t == "DATE" or t.startswith("TIMESTAMP"):
+        for df in _DATE_FORMATS:
+            for tf in (_TIME_FORMATS if t != "DATE" else ("",)):
+                try:
+                    parsed = dt.datetime.strptime(s, df + tf)
+                except ValueError:
+                    continue
+                return parsed.date().isoformat() if t == "DATE" else parsed.isoformat(sep=" ")
+        return s
+    if t == "BOOLEAN":
+        low = s.lower()
+        if low in ("yes", "y", "ja", "true", "t", "1", "wahr"):
+            return "true"
+        if low in ("no", "n", "nein", "false", "f", "0", "falsch"):
+            return "false"
+    return s
+
+
 def _clean_db_error(exc):
     msg = str(exc).strip()
     msg = re.sub(r"^\w+ Error:\s*", "", msg)
@@ -479,10 +549,10 @@ class Workbook:
             return [self._create_from_reader(base, "read_parquet(?)", [path])]
         if ext in (".json", ".jsonl", ".ndjson"):
             return [self._create_from_reader(base, "read_json_auto(?)", [path])]
-        return [self._create_from_reader(base, self._csv_reader(options), [path], csv_mode=True)]
+        return [self._import_csv(base, path, options)]
 
     @staticmethod
-    def _csv_reader(options):
+    def _csv_reader(options, tolerant=False, serial=False):
         args = ["?"]
         delim = options.get("delimiter")
         if delim:
@@ -497,8 +567,62 @@ class Workbook:
             args.append("all_varchar = true")
         if options.get("skip_bad"):
             args.append("ignore_errors = true")
+        if tolerant:
+            # Rows with missing fields are padded with blanks; extra fields are ignored.
+            args.append("null_padding = true")
+            args.append("strict_mode = false")
+        if serial:
+            args.append("parallel = false")
         args.append("sample_size = 100000")
         return "read_csv(" + ", ".join(args) + ")"
+
+    def _csv_layout_ok(self, reader, params):
+        """False when the file cannot be read normally, or collapses into one column."""
+        try:
+            desc = self.cursor().execute(f"DESCRIBE SELECT * FROM {reader}", params).fetchall()
+        except duckdb.Error:
+            return False
+        if len(desc) == 1 and any(ch in str(desc[0][0]) for ch in ",;\t|"):
+            return False
+        return True
+
+    def _import_csv(self, base, path, options):
+        normal = self._csv_reader(options)
+        if self._csv_layout_ok(normal, [path]):
+            try:
+                return self._create_from_reader(base, normal, [path], csv_mode=True)
+            except EngineError:
+                pass  # fall through to the tolerant reader
+        delim = options.get("delimiter") or self._guess_delimiter(path, options.get("encoding"))
+        opts = dict(options, delimiter=delim)
+        try:
+            return self._create_from_reader(base, self._csv_reader(opts, tolerant=True), [path], csv_mode=True)
+        except EngineError as e:
+            if "parallel" not in str(e).lower():
+                raise
+        return self._create_from_reader(base, self._csv_reader(opts, tolerant=True, serial=True), [path],
+                                        csv_mode=True)
+
+    @staticmethod
+    def _guess_delimiter(path, encoding=None):
+        """The separator that appears most consistently in the first lines of the file."""
+        enc = {"latin-1": "latin-1", "utf-16": "utf-16"}.get(encoding or "", "utf-8")
+        try:
+            with open(path, "r", encoding=enc, errors="replace", newline="") as f:
+                lines = [f.readline() for _ in range(50)]
+        except OSError:
+            return None
+        lines = [ln for ln in lines if ln.strip()]
+        best, best_score = None, 0
+        for ch in (",", ";", "\t", "|"):
+            counts = [ln.count(ch) for ln in lines]
+            if not counts or counts[0] == 0:
+                continue
+            same = sum(1 for c in counts if c == counts[0])
+            score = counts[0] * same
+            if score > best_score:
+                best, best_score = ch, score
+        return best
 
     def _create_from_reader(self, base, reader, params, csv_mode=False):
         name = self.unique_sheet_name(base)
@@ -533,7 +657,16 @@ class Workbook:
             try:
                 with open(tmp, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    for row in sheet.iter_rows():
+                    rows = sheet.iter_rows()
+                    head = []
+                    for row in rows:
+                        head.append([_excel_cell(v) for v in row])
+                        if len(head) >= 30:
+                            break
+                    start = _header_row(head) if options.get("header") is not False else 0
+                    for row in head[start:]:
+                        writer.writerow(row)
+                    for row in rows:
                         writer.writerow([_excel_cell(v) for v in row])
                 label = base if len(wanted) == 1 else f"{base} - {sheet_name}"
                 opts = dict(options)
@@ -641,9 +774,10 @@ class Workbook:
                         clauses.append(f"lower({c}) {sql_op} lower(?)")
                     else:
                         clauses.append(f"{c} {sql_op} ?")
+                    params.append(str(value))
                 else:
                     clauses.append(f"{c} {sql_op} TRY_CAST(? AS {typ})")
-                params.append(str(value))
+                    params.append(normalize_value(typ, value))
         if not clauses:
             return "", []
         return " WHERE " + " AND ".join(clauses), params
@@ -654,9 +788,10 @@ class Workbook:
         typ = self.column_type(sheet, col)
         if typ.upper() == "VARCHAR":
             return
-        ok = self._exec(f"SELECT TRY_CAST(? AS {typ}) IS NOT NULL", [str(value)]).fetchone()[0]
+        ok = self._exec(f"SELECT TRY_CAST(? AS {typ}) IS NOT NULL", [normalize_value(typ, value)]).fetchone()[0]
         if not ok:
-            raise EngineError(f'"{value}" is not a valid {friendly_type(typ)} for column {col}.')
+            raise EngineError(f'"{value}" is not a valid {friendly_type(typ)} for column {col}. '
+                              "Values like 1234.5, 1,234.50, 31.01.2024 or 2024-01-31 work.")
 
     def prepare_view(self, sheet, sorts, filters):
         """Build the scratch table for a sort/filter (worker thread). Returns (table, count)."""
@@ -932,6 +1067,8 @@ class Workbook:
             if col not in types:
                 raise EngineError(f"Column {col} not found")
             texts = [None if (t is None or str(t) == "") else str(t) for t in texts]
+            if types[col].upper() != "VARCHAR":
+                texts = [None if t is None else normalize_value(types[col], t) for t in texts]
             self._validate_texts(sheet, col, types[col], texts)
             prepared.append((col, list(rids), texts))
         entry = {"sheet": sheet, "changes": []}
@@ -1414,6 +1551,20 @@ class Workbook:
                     os.remove(p)
                 except OSError:
                     pass
+
+
+def _header_row(rows):
+    """Index of the real header row, skipping title and blank rows above a table."""
+    filled = [sum(1 for v in r if str(v).strip()) for r in rows]
+    if not filled:
+        return 0
+    widest = max(filled)
+    if widest < 2:
+        return 0
+    for i, n in enumerate(filled):
+        if n >= max(2, int(widest * 0.6)):
+            return i
+    return 0
 
 
 def _excel_cell(v):
