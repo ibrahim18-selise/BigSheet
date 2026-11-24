@@ -280,3 +280,21 @@ def test_local_number_and_date_formats(wb):
     assert c > 0
     wb.set_cells("sales", "price", [0], ["1.234,50"])
     assert wb.fetch("sales", 0, 1)[1][0][2] == 1234.5
+
+
+def test_unreadable_rows_are_skipped_and_reported(tmpdir_path):
+    path = os.path.join(tmpdir_path, "broken.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "price", "city"])
+        for i in range(150000):
+            w.writerow([i, i * 1.5, "Dhaka"])
+        w.writerow(["x", "not a number", "y", "extra"])
+        w.writerow([150001, 2.5, "Sylhet"])
+    wb = Workbook()
+    name = wb.import_file(path)[0]
+    assert dict(wb.columns(name)) == {"id": "BIGINT", "price": "DOUBLE", "city": "VARCHAR"}
+    assert wb.row_total(name) == 150001
+    note = wb.import_notes[name]
+    assert note.startswith("1 row could not be read") and "150,002" in note
+    wb.close()
