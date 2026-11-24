@@ -78,12 +78,28 @@ work with Excel and Google Sheets. Pasting one value into a selection fills it. 
 the selected cells. Undo and redo cover cell edits.
 
 **Rows and columns.** Right-click a cell for insert and delete row options. Right-click a
-column header to sort, filter, rename, change type, delete, or see statistics.
+column header to rename, change type, delete, or see statistics.
 
-**Sort and filter.** Sort A to Z or Z to A on the current column, or use Data, Custom sort for
-up to three levels. Filters can be stacked: equals, contains, greater than, is empty and more.
-"Filter by selected value" is the fastest way. A bar above the grid shows what is active and
-has a button to clear it. The status bar shows how many rows match.
+**Sort and filter.** Every column header has a small dropdown button. It sorts the column and
+filters it by condition (equals, contains, greater than, is empty and more) or by ticking the
+values to keep, with a count next to each value and a search box. Filters on several columns
+combine. A blue funnel marks filtered columns, a small triangle marks the sort column, and a bar
+above the grid shows what is active with a button to clear it. Data, Custom sort sorts by up to
+three columns.
+
+**Formatting.** The toolbar sets number formats (number, currency in $, €, £, ৳, ₹ or CHF,
+percent, scientific), date formats, decimal places, bold, italic, text and fill colour, and
+alignment. Formatting applies to whole columns and is saved in the workbook. The Format menu has
+the same options, plus Clear formatting.
+
+**Pivot tables.** Insert, Pivot table creates a pivot sheet from the sheet you are on and opens
+the pivot panel. Drag fields into Rows, Columns and Values (or right-click a field). The pivot
+updates as you change it. Right-click or double-click a value to switch between sum, average,
+count, unique count, minimum, maximum and median. Open the pivot sheet later and the panel shows
+its settings again.
+
+**Sample data.** "Try sample data" on the start screen (or File, Add sample data) adds a
+million rows of made-up sales data to explore the features with.
 
 **Formula columns.** Columns, Add formula column. Formulas use Excel syntax with column names
 in square brackets and are calculated for every row:
@@ -98,9 +114,8 @@ function. Use "Preview first rows" to check a formula before adding it. The resu
 as a normal column. After you edit data the formula depends on, use Columns, Recalculate
 formulas.
 
-**Summaries and pivots.** Data, Summarize / pivot. Group by one or more columns and calculate
-counts, sums, averages, minimums, maximums or medians. Optionally spread one column's values
-across columns (a pivot table). The result is a new sheet.
+**Group and summarize.** Data, Group and summarize makes a one-off summary sheet, as an
+alternative to a pivot table that keeps updating.
 
 **Other tools.** Remove duplicates (to a new sheet), Find (Ctrl+F or Cmd+F), Go to row
 (Ctrl+G), column statistics, and the selection summary in the status bar
