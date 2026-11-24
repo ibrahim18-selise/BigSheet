@@ -80,23 +80,20 @@ the selected cells. Undo and redo cover cell edits.
 **Rows and columns.** Right-click a cell for insert and delete row options. Right-click a
 column header to rename, change type, delete, or see statistics.
 
-**Sort and filter.** Every column header has a small dropdown button. It sorts the column and
-filters it by condition (equals, contains, greater than, is empty and more) or by ticking the
-values to keep, with a count next to each value and a search box. Filters on several columns
-combine. A blue funnel marks filtered columns, a small triangle marks the sort column, and a bar
-above the grid shows what is active with a button to clear it. Data, Custom sort sorts by up to
-three columns.
+**Sort and filter.** Click the Filter button in the toolbar (or press Ctrl+Shift+L) to turn
+filtering on: every column header gets a small button. Click it to sort the column A to Z or
+Z to A, or to filter by values: tick the values to keep, with a count next to each and a search
+box to find values quickly. Filters on several columns combine. A blue funnel marks filtered
+columns and a bar above the grid shows what is active. Click Filter again to turn filtering off
+and show all rows. Tip: click the top-left corner of the grid first to select everything.
+Data, Filter by condition offers extra conditions such as "greater than" or "contains".
 
 **Formatting.** The toolbar sets number formats (number, currency in $, €, £, ৳, ₹ or CHF,
-percent, scientific), date formats, decimal places, bold, italic, text and fill colour, and
-alignment. Formatting applies to whole columns and is saved in the workbook. The Format menu has
-the same options, plus Clear formatting.
-
-**Pivot tables.** Insert, Pivot table creates a pivot sheet from the sheet you are on and opens
-the pivot panel. Drag fields into Rows, Columns and Values (or right-click a field). The pivot
-updates as you change it. Right-click or double-click a value to switch between sum, average,
-count, unique count, minimum, maximum and median. Open the pivot sheet later and the panel shows
-its settings again.
+percent, scientific), date formats, decimal places, bold, italic, text colour and alignment for
+whole columns. **Fill colour** follows your selection: click a column letter to colour the column,
+click row numbers to colour whole rows, or select cells to colour just those cells. Colours stay
+with their rows when you sort or filter, and everything is saved in the workbook. Clear formatting
+removes them again.
 
 **Sample data.** "Try sample data" on the start screen (or File, Add sample data) adds a
 million rows of made-up sales data to explore the features with.
@@ -114,13 +111,12 @@ function. Use "Preview first rows" to check a formula before adding it. The resu
 as a normal column. After you edit data the formula depends on, use Columns, Recalculate
 formulas.
 
-**Group and summarize.** Data, Group and summarize makes a one-off summary sheet, as an
-alternative to a pivot table that keeps updating.
+**Group and summarize.** Data, Group and summarize makes a summary sheet grouped by the
+columns you choose.
 
 **Other tools.** Remove duplicates (to a new sheet), Find (Ctrl+F or Cmd+F), Go to row
 (Ctrl+G), column statistics, and the selection summary in the status bar
-(count, sum, average, min, max). Tools, SQL window lets advanced users query sheets
-with SQL and save results as new sheets.
+(count, sum, average, min, max).
 
 **Export.** File, Export sheet writes CSV, Excel, Parquet or JSON, either the whole sheet or
 only the current sorted and filtered view.
@@ -128,7 +124,7 @@ only the current sorted and filtered view.
 ## 4. Security
 
 * **No network access.** The engine cannot download anything, HTTP and S3 access is disabled,
-  and the configuration is locked so it cannot be re-enabled, not even from the SQL window.
+  and the configuration is locked so it cannot be re-enabled from inside the app.
 * **Encrypted workbooks.** Workbooks saved with a password are encrypted with AES-256, including
   temporary spill files. Unsaved work is also kept encrypted, with a random key. There is no
   way to recover a workbook if its password is lost.
