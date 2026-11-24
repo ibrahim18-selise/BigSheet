@@ -112,6 +112,9 @@ QWidget#FormulaBar {{ background: #ffffff; border-bottom: 1px solid {BORDER}; }}
 QWidget#ViewBar {{ background: #f0f5ff; border-bottom: 1px solid {ACCENT_LINE}; }}
 QWidget#TabsRow {{ background: {CHROME}; border-top: 1px solid {BORDER}; }}
 QFrame#Popup {{ background: #ffffff; border: 1px solid #d5dae2; border-radius: 10px; }}
+QPushButton#MenuRow {{ border: none; background: transparent; text-align: left; padding: 7px 8px;
+                       border-radius: 6px; }}
+QPushButton#MenuRow:hover {{ background: {HOVER}; }}
 QFrame#Card {{ border: 1px solid {BORDER}; border-radius: 10px; background: #ffffff; }}
 """
 
