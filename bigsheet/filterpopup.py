@@ -20,9 +20,11 @@ class FilterPopup(QFrame):
         self.window_ref = window
         self.wb = window.wb
         self.sheet, self.col, self.col_type = sheet, col, col_type
-        view = self.wb.view(sheet)
-        self.filters = view.filters
-        self.existing = next((f for f in view.filters if f["col"] == col), None)
+        if hasattr(window, "_target_view"):
+            self.filters = window._target_view(sheet)[1]
+        else:
+            self.filters = self.wb.view(sheet).filters
+        self.existing = next((f for f in self.filters if f["col"] == col), None)
         self.checked = {}       # value text (or None for blanks) -> checked
         self.truncated = False
 
