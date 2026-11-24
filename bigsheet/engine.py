@@ -552,7 +552,7 @@ class Workbook:
         return [self._import_csv(base, path, options)]
 
     @staticmethod
-    def _csv_reader(options, tolerant=False, serial=False):
+    def _csv_reader(options, tolerant=False, serial=False, rejects=None):
         args = ["?"]
         delim = options.get("delimiter")
         if delim:
@@ -573,6 +573,11 @@ class Workbook:
             args.append("strict_mode = false")
         if serial:
             args.append("parallel = false")
+        if rejects and not options.get("skip_bad"):
+            # Skip rows that cannot be read, but keep a record of them to tell the user.
+            args.append("ignore_errors = true")
+            args.append(f"store_rejects = true, rejects_table = {sql_string(rejects)}, "
+                        f"rejects_scan = {sql_string(rejects + '_scan')}")
         args.append("sample_size = 100000")
         return "read_csv(" + ", ".join(args) + ")"
 
@@ -587,21 +592,59 @@ class Workbook:
         return True
 
     def _import_csv(self, base, path, options):
-        normal = self._csv_reader(options)
-        if self._csv_layout_ok(normal, [path]):
+        rejects = f"bs_rejects_{secrets.token_hex(4)}"
+        name = None
+        if self._csv_layout_ok(self._csv_reader(options), [path]):
             try:
-                return self._create_from_reader(base, normal, [path], csv_mode=True)
+                name = self._create_from_reader(base, self._csv_reader(options, rejects=rejects), [path],
+                                                csv_mode=True)
             except EngineError:
-                pass  # fall through to the tolerant reader
-        delim = options.get("delimiter") or self._guess_delimiter(path, options.get("encoding"))
-        opts = dict(options, delimiter=delim)
+                name = None  # fall through to the tolerant reader
+        if name is None:
+            delim = options.get("delimiter") or self._guess_delimiter(path, options.get("encoding"))
+            opts = dict(options, delimiter=delim)
+            try:
+                name = self._create_from_reader(
+                    base, self._csv_reader(opts, tolerant=True, rejects=rejects), [path], csv_mode=True)
+            except EngineError as e:
+                if "parallel" not in str(e).lower():
+                    raise
+                name = self._create_from_reader(
+                    base, self._csv_reader(opts, tolerant=True, serial=True, rejects=rejects), [path],
+                    csv_mode=True)
+        self._note_rejects(name, rejects)
+        return name
+
+    def _note_rejects(self, sheet, rejects):
+        """Remember which rows were skipped so the user can be told."""
+        self.import_notes = getattr(self, "import_notes", {})
+        cur = self.cursor()
         try:
-            return self._create_from_reader(base, self._csv_reader(opts, tolerant=True), [path], csv_mode=True)
-        except EngineError as e:
-            if "parallel" not in str(e).lower():
-                raise
-        return self._create_from_reader(base, self._csv_reader(opts, tolerant=True, serial=True), [path],
-                                        csv_mode=True)
+            rows = cur.execute(f"SELECT DISTINCT line, error_type FROM {quote_ident(rejects)} ORDER BY line").fetchall()
+        except duckdb.Error:
+            return
+        finally:
+            for t in (rejects, rejects + "_scan"):
+                try:
+                    cur.execute(f"DROP TABLE IF EXISTS {quote_ident(t)}")
+                except duckdb.Error:
+                    pass
+        if not rows:
+            return
+        by_line = {}
+        for line, kind in rows:
+            by_line.setdefault(int(line), kind)
+        kinds = {"CAST": "a value of the wrong type", "MISSING COLUMNS": "too few fields",
+                 "TOO MANY COLUMNS": "too many fields", "UNQUOTED VALUE": "a stray quote",
+                 "LINE SIZE OVER MAXIMUM": "a line that is too long", "INVALID UNICODE": "unreadable characters"}
+        reasons = sorted({kinds.get(str(k), str(k).lower()) for _, k in rows})
+        line_numbers = sorted(by_line)
+        lines = ", ".join(f"{n:,}" for n in line_numbers[:5]) + (" and more" if len(line_numbers) > 5 else "")
+        n = len(line_numbers)
+        self.import_notes[sheet] = (f"{n:,} row{'s' if n != 1 else ''} could not be read and "
+                                    f"{'were' if n != 1 else 'was'} skipped (line{'s' if n != 1 else ''} "
+                                    f"{lines}: {', '.join(reasons)}). All other rows were imported. To keep "
+                                    "every row, import again with 'Treat all columns as text'.")
 
     @staticmethod
     def _guess_delimiter(path, encoding=None):
