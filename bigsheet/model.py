@@ -139,8 +139,11 @@ class SheetModel(QAbstractTableModel):
     def _load_formats(self):
         try:
             self.formats = self.wb.column_formats(self.sheet)
+            self.has_fills = self.wb.has_fills(self.sheet)
         except EngineError:
             self.formats = {}
+            self.has_fills = False
+        self._fill_colors = {}
         self._styles = []
         aligns = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter, "right": Qt.AlignRight}
         for i, (name, typ) in enumerate(self.cols):
@@ -194,7 +197,9 @@ class SheetModel(QAbstractTableModel):
         if self.frozen:
             return None
         try:
-            hit = self.wb.fetch(self.sheet, b * BLOCK, BLOCK)
+            rids, rows = self.wb.fetch(self.sheet, b * BLOCK, BLOCK)
+            fills = self.wb.fills_for(self.sheet, rids) if self.has_fills else {}
+            hit = (rids, rows, fills)
         except Exception:
             return None
         self._cache[b] = hit
@@ -246,6 +251,18 @@ class SheetModel(QAbstractTableModel):
         if role == Qt.ForegroundRole:
             return style[2]
         if role == Qt.BackgroundRole:
+            if self.has_fills:
+                blk = self._block(index.row() // BLOCK)
+                if blk is not None and blk[2]:
+                    i = index.row() % BLOCK
+                    if i < len(blk[0]):
+                        rid = blk[0][i]
+                        color = blk[2].get((rid, self.cols[c][0])) or blk[2].get((rid, ""))
+                        if color:
+                            q = self._fill_colors.get(color)
+                            if q is None:
+                                q = self._fill_colors[color] = QColor(color)
+                            return q
             return style[3]
         return None
 
