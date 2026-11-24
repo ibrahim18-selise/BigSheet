@@ -985,6 +985,9 @@ class MainWindow(QMainWindow):
             rows = sum(self.wb.row_total(n) for n in names)
             self.info(f"Imported {os.path.basename(path)}: {rows:,} rows in {secs:.1f} s")
             self.after_sheets_changed(select=names[0])
+            notes = [self.wb.import_notes.pop(n) for n in names if n in getattr(self.wb, "import_notes", {})]
+            if notes:
+                QMessageBox.information(self, "Some rows were skipped", "\n\n".join(notes))
             self._import_next(names[0])
 
         def fail(msg):
