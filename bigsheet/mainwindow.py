@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
         self.a_formula_bar = self._act(m, "Formula bar", self._toggle_formula_bar, needs_sheet=False)
         self.a_formula_bar.setCheckable(True)
         self.a_formula_bar.setChecked(True)
-        self.a_pivot_panel = self._act(m, "Pivot panel", self.toggle_pivot_panel, needs_sheet=False)
+        self.a_pivot_panel = self._act(None, "Pivot panel", self.toggle_pivot_panel, needs_sheet=False)
         self.a_pivot_panel.setCheckable(True)
         m.addSeparator()
         self._act(m, "Zoom in", lambda: self.zoom(1), QKeySequence.ZoomIn, needs_sheet=False)
@@ -344,7 +344,7 @@ class MainWindow(QMainWindow):
         self.a_formula.setIcon(I("fx"))
         self._act(m, "Empty column...", self.add_empty_column, mutates=True)
         m.addSeparator()
-        self.a_pivot = self._act(m, "Pivot table", self.insert_pivot, mutates=True)
+        self.a_pivot = self._act(None, "Pivot table", self.insert_pivot, mutates=True)
         self.a_pivot.setIcon(I("pivot"))
         self._act(m, "Sheet from file...", self.import_dialog, mutates=True, needs_sheet=False)
 
@@ -393,8 +393,13 @@ class MainWindow(QMainWindow):
         self.a_sort_za.setIcon(I("sort_za"))
         self._act(m, "Custom sort...", self.custom_sort, mutates=True)
         m.addSeparator()
-        self.a_filter = self._act(m, "Filter column...", self.filter_current_column, "Ctrl+Shift+L", mutates=True)
+        self.a_filter = self._act(m, "Filter", self.toggle_filter, "Ctrl+Shift+L", mutates=True,
+                                  tip="Turn filtering on or off for all columns")
         self.a_filter.setIcon(I("filter"))
+        self.a_filter.setCheckable(True)
+        self.a_filter.setToolTip("Filter: turn filtering on or off for all columns (Ctrl+Shift+L)")
+        self._act(m, "Filter this column...", self.filter_current_column, mutates=True)
+        self._act(m, "Filter by condition...", lambda: self.add_filter(), mutates=True)
         self._act(m, "Filter by selected value", lambda: self.filter_by_value("eq"), mutates=True)
         self._act(m, "Hide rows with selected value", lambda: self.filter_by_value("ne"), mutates=True)
         self.a_clear_view = self._act(m, "Clear sort and filters", self.clear_view, mutates=True)
@@ -406,7 +411,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Column statistics...", lambda: self.column_stats())
 
         m = mb.addMenu("&Tools")
-        self.a_sql = self._act(m, "SQL window...", self.open_sql, "Ctrl+Shift+Q", needs_sheet=False)
+        self.a_sql = self._act(None, "SQL window...", self.open_sql, needs_sheet=False)
         self.a_sql.setIcon(I("sql"))
         self._act(m, "Memory limit...", self.memory_settings, needs_sheet=False)
 
@@ -454,7 +459,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_filter, self.a_sort_az, self.a_sort_za):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (self.a_formula, self.a_pivot, self.a_find, self.a_sql):
+        for a in (self.a_formula, self.a_find):
             tb.addAction(a)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -847,8 +852,6 @@ class MainWindow(QMainWindow):
         self.stats_label.setText("")
         if model.rowCount() and model.columnCount():
             self.table.setCurrentIndex(model.index(0, 0))
-        if self.wb.pivot_spec(sheet) is not None and not self.pivot_panel.isVisible():
-            self.pivot_panel.show()
         if self.pivot_panel.isVisible():
             self.pivot_panel.bind(sheet)
         self.a_pivot_panel.setChecked(self.pivot_panel.isVisible())
@@ -1614,7 +1617,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Sort A to Z", lambda: self.sort_current(True))
         menu.addAction("Sort Z to A", lambda: self.sort_current(False))
-        menu.addAction("Filter...", lambda: self.add_filter(col))
+        menu.addAction("Filter...", self.filter_current_column)
         if any(f["col"] == col for f in v.filters):
             menu.addAction("Remove filter on this column", lambda: self.clear_column_filter(col))
         menu.addSeparator()
@@ -1704,20 +1707,48 @@ class MainWindow(QMainWindow):
     def _sync_header(self):
         m = self.model
         h = self.col_header
+        if not hasattr(self, "_filter_on"):
+            self._filter_on = set()
         if not m or not self.wb:
-            h.filtered, h.sorts, h.formula_cols = set(), {}, set()
+            h.filtered, h.sorts, h.formula_cols, h.filter_mode = set(), {}, set(), False
         else:
             v = self.wb.view(self.sheet)
             index = {name: i for i, (name, _) in enumerate(m.cols)}
             h.filtered = {index[f["col"]] for f in v.filters if f["col"] in index}
             h.sorts = {index[c]: a for c, a in v.sorts if c in index}
             h.formula_cols = {index[c] for c in m.formulas if c in index}
+            if self._target_view(self.sheet)[1]:
+                self._filter_on.add(self.sheet)
+            h.filter_mode = self.sheet in self._filter_on
+        self.a_filter.setChecked(h.filter_mode)
         h.viewport().update()
+
+    def toggle_filter(self):
+        """Turn filter buttons on for every column, or turn filtering off and clear the filters."""
+        if not self.sheet:
+            return
+        if not hasattr(self, "_filter_on"):
+            self._filter_on = set()
+        if self.sheet in self._filter_on:
+            self._filter_on.discard(self.sheet)
+            sorts, filters = self._target_view(self.sheet)
+            if filters:
+                self._apply_view_async(self.sheet, sorts, [], "Removing filters")
+            self.info("Filter turned off.")
+        else:
+            self._filter_on.add(self.sheet)
+            self.info("Filter is on. Click the button on any column header to sort or filter it.")
+        self._sync_header()
 
     def _open_filter_popup(self, logical, pos):
         m = self.model
         if not m or logical >= len(m.cols):
             return
+        if not hasattr(self, "_filter_on"):
+            self._filter_on = set()
+        if self.sheet not in self._filter_on:
+            self._filter_on.add(self.sheet)
+            self._sync_header()
         self.table.setCurrentIndex(m.index(max(self.table.currentIndex().row(), 0), logical))
         name, typ = m.cols[logical]
         popup = FilterPopup(self, self.sheet, name, typ)
@@ -1733,6 +1764,10 @@ class MainWindow(QMainWindow):
             self.error("Click a cell in the column you want to filter.")
             return
         c = idx.column()
+        if not hasattr(self, "_filter_on"):
+            self._filter_on = set()
+        self._filter_on.add(self.sheet)
+        self._sync_header()
         r = self.col_header.button_rect(c)
         self._open_filter_popup(c, self.col_header.viewport().mapToGlobal(r.bottomLeft()))
 
@@ -1809,9 +1844,47 @@ class MainWindow(QMainWindow):
         self.apply_format({"align": None if fmt.get("align") == key else key})
 
     def set_color(self, key, color, button=None, icon_name=None):
-        self.apply_format({key: color})
+        if key == "fill":
+            self.apply_fill(color)
+        else:
+            self.apply_format({key: color})
         if button is not None and color:
             button.setIcon(theme.color_icon(icon_name, color))
+
+    def apply_fill(self, color):
+        """Colour what is selected: whole columns, whole rows, or individual cells."""
+        m = self.model
+        ranges = self._ranges()
+        if not m or not ranges or self.busy:
+            return
+        ncols = len(m.cols)
+        col_names, row_spans, cell_spans = [], [], []
+        for t, b, l, r in ranges:
+            if t == 0 and b >= m.count - 1:
+                col_names += [m.cols[c][0] for c in range(l, r + 1)]
+            elif l == 0 and r >= ncols - 1:
+                row_spans.append((t, b))
+            else:
+                cell_spans.append((t, b, l, r))
+        rows_needed = sum(b - t + 1 for t, b in row_spans) + sum(b - t + 1 for t, b, _, _ in cell_spans)
+        if rows_needed > 200_000:
+            self.error("That is a lot of rows to colour one by one. Select whole columns instead, "
+                       "or colour fewer rows at a time.")
+            return
+        try:
+            if col_names:
+                self.wb.set_column_format(self.sheet, col_names, {"fill": color})
+            for t, b in row_spans:
+                rid_map = self.wb.rids_for_positions(self.sheet, list(range(t, b + 1)))
+                self.wb.set_fills(self.sheet, [rid_map[p] for p in range(t, b + 1)], None, color)
+            for t, b, l, r in cell_spans:
+                rid_map = self.wb.rids_for_positions(self.sheet, list(range(t, b + 1)))
+                self.wb.set_fills(self.sheet, [rid_map[p] for p in range(t, b + 1)],
+                                  [m.cols[c][0] for c in range(l, r + 1)], color)
+        except EngineError as e:
+            self.error(str(e))
+            return
+        m.reload_formats()
 
     def _custom_color(self, key, button, icon_name):
         fmt, _ = self._current_format()
@@ -1821,11 +1894,23 @@ class MainWindow(QMainWindow):
             self.set_color(key, c.name(), button, icon_name)
 
     def clear_formatting(self):
-        cols = self._selected_columns()
-        if not cols:
+        m = self.model
+        ranges = self._ranges()
+        if not m or not ranges:
             return
-        self.wb.clear_column_format(self.sheet, cols)
-        self.model.reload_formats()
+        whole_cols = []
+        for t, b, l, r in ranges:
+            names = [m.cols[c][0] for c in range(l, r + 1)]
+            if t == 0 and b >= m.count - 1:
+                whole_cols += names
+                self.wb.clear_fills(self.sheet, None, names)
+            elif b - t < 200_000:
+                rid_map = self.wb.rids_for_positions(self.sheet, list(range(t, b + 1)))
+                rids = [rid_map[p] for p in range(t, b + 1)]
+                self.wb.clear_fills(self.sheet, rids, None if (l == 0 and r >= len(m.cols) - 1) else names)
+        if whole_cols:
+            self.wb.clear_column_format(self.sheet, whole_cols)
+        m.reload_formats()
         self._sync_format_controls()
 
     def _sync_format_controls(self):
