@@ -561,8 +561,14 @@ class MainWindow(QMainWindow):
 
     # ============================================================ busy tasks
 
-    def run_task(self, label, fn, on_done=None, on_fail=None, *args, freeze=False):
+    def run_task(self, label, fn, on_done=None, on_fail=None, *args, freeze=False, queue_key=None):
         if self.busy:
+            if queue_key:
+                # Run it when the current task finishes; a newer request with the same key wins.
+                self._pending = [p for p in getattr(self, "_pending", []) if p[0] != queue_key]
+                self._pending.append((queue_key, label, fn, on_done, on_fail, args, freeze))
+                self.info(f"{label} as soon as the current task finishes...")
+                return None
             self.error("Please wait for the current task to finish (or cancel it).")
             return None
         self.busy = True
@@ -591,6 +597,7 @@ class MainWindow(QMainWindow):
             if on_done:
                 on_done(result)
             self._update_actions()
+            QTimer.singleShot(0, self._run_pending)
 
         def fail(msg):
             finish()
@@ -598,6 +605,7 @@ class MainWindow(QMainWindow):
                 on_fail(msg)
             else:
                 self.error(msg)
+            QTimer.singleShot(0, self._run_pending)
 
         wb = self.wb
 
@@ -609,6 +617,13 @@ class MainWindow(QMainWindow):
                     wb.release_cursor()
 
         return self.runner.start(work, done, fail, *args)
+
+    def _run_pending(self):
+        pending = getattr(self, "_pending", [])
+        if self.busy or not pending:
+            return
+        key, label, fn, on_done, on_fail, args, freeze = pending.pop(0)
+        self.run_task(label, fn, on_done, on_fail, *args, freeze=freeze, queue_key=key)
 
     def _tick_busy(self):
         secs = int(time.time() - self._busy_started)
@@ -864,8 +879,8 @@ class MainWindow(QMainWindow):
         if top >= 0:
             rows.update(range(top, min(n, top + sample)))
         for r in rows:
-            width = max(width, fm.horizontalAdvance(model.display_at(r, c)) + 22)
-        return max(90, min(width, 360))
+            width = max(width, fm.horizontalAdvance(model.display_at(r, c)) + 18)
+        return max(70, min(width, 240))
 
     def _grow_columns(self, names):
         """Widen columns whose formatted contents no longer fit (never narrows them)."""
@@ -1049,12 +1064,26 @@ class MainWindow(QMainWindow):
 
     # ============================================================ view (sort/filter)
 
+    def _target_view(self, sheet):
+        """The sort and filters most recently asked for (they may still be applying)."""
+        wanted = getattr(self, "_wanted_view", {}).get(sheet)
+        if wanted is not None:
+            return wanted
+        v = self.wb.view(sheet)
+        return list(v.sorts), [dict(f) for f in v.filters]
+
     def _apply_view_async(self, sheet, sorts, filters, label="Sorting and filtering"):
+        if not hasattr(self, "_wanted_view"):
+            self._wanted_view = {}
+        self._wanted_view[sheet] = (list(sorts), [dict(f) for f in filters])
+
         def build():
             return self.wb.prepare_view(sheet, sorts, filters)
 
         def done(result):
             table, count = result
+            if self._wanted_view.get(sheet) == (list(sorts), [dict(f) for f in filters]):
+                self._wanted_view.pop(sheet, None)
             self.wb.apply_view(sheet, sorts, filters, table, count)
             m = self.models.get(sheet)
             if m:
@@ -1063,28 +1092,33 @@ class MainWindow(QMainWindow):
             if count == 0:
                 self.info("No rows match the filter.")
 
-        self.run_task(label, build, done)
+        def fail(msg):
+            self._wanted_view.pop(sheet, None)
+            self.error(msg)
+
+        self.run_task(label, build, done, fail, queue_key="view:" + sheet)
 
     def sort_current(self, ascending):
         col = self._current_col()
         if not col:
             self.error("Click a cell in the column you want to sort by.")
             return
-        v = self.wb.view(self.sheet)
-        self._apply_view_async(self.sheet, [(col, ascending)], v.filters, "Sorting")
+        sorts, filters = self._target_view(self.sheet)
+        self._apply_view_async(self.sheet, [(col, ascending)], filters, "Sorting")
 
     def custom_sort(self):
         if not self.sheet:
             return
-        v = self.wb.view(self.sheet)
-        dlg = SortDialog(self.model.cols, v.sorts, self)
+        sorts, filters = self._target_view(self.sheet)
+        dlg = SortDialog(self.model.cols, sorts, self)
         if dlg.exec() == QDialog.Accepted:
-            self._apply_view_async(self.sheet, dlg.sorts(), v.filters, "Sorting")
+            self._apply_view_async(self.sheet, dlg.sorts(), filters, "Sorting")
 
     def add_filter(self, column=None):
         if not self.sheet:
             return
         v = self.wb.view(self.sheet)
+        sorts, filters = self._target_view(self.sheet)
         dlg = FilterDialog(self.model.cols, column or self._current_col(), v.describe() if v.filters else "", self)
         if dlg.exec() != QDialog.Accepted:
             return
@@ -1094,7 +1128,7 @@ class MainWindow(QMainWindow):
         except EngineError as e:
             self.error(str(e))
             return
-        self._apply_view_async(self.sheet, v.sorts, v.filters + [f], "Filtering")
+        self._apply_view_async(self.sheet, sorts, filters + [f], "Filtering")
 
     def filter_by_value(self, op):
         idx = self.table.currentIndex()
@@ -1106,16 +1140,20 @@ class MainWindow(QMainWindow):
             f = {"col": col, "op": "not_empty" if op == "ne" else "empty", "value": ""}
         else:
             f = {"col": col, "op": op, "value": value}
-        v = self.wb.view(self.sheet)
-        self._apply_view_async(self.sheet, v.sorts, v.filters + [f], "Filtering")
+        sorts, filters = self._target_view(self.sheet)
+        self._apply_view_async(self.sheet, sorts, filters + [f], "Filtering")
 
     def clear_column_filter(self, col):
-        v = self.wb.view(self.sheet)
-        self._apply_view_async(self.sheet, v.sorts, [f for f in v.filters if f["col"] != col], "Filtering")
+        sorts, filters = self._target_view(self.sheet)
+        self._apply_view_async(self.sheet, sorts, [f for f in filters if f["col"] != col], "Filtering")
 
     def clear_view(self):
-        if not self.sheet or self.busy:
+        if not self.sheet:
             return
+        if self.busy:
+            self._apply_view_async(self.sheet, [], [], "Clearing filters")
+            return
+        getattr(self, "_wanted_view", {}).pop(self.sheet, None)
         self.wb.reset_view(self.sheet)
         self.model.reset()
         self._update_status()
@@ -1675,7 +1713,7 @@ class MainWindow(QMainWindow):
 
     def _open_filter_popup(self, logical, pos):
         m = self.model
-        if not m or self.busy or logical >= len(m.cols):
+        if not m or logical >= len(m.cols):
             return
         self.table.setCurrentIndex(m.index(max(self.table.currentIndex().row(), 0), logical))
         name, typ = m.cols[logical]
@@ -1696,15 +1734,15 @@ class MainWindow(QMainWindow):
         self._open_filter_popup(c, self.col_header.viewport().mapToGlobal(r.bottomLeft()))
 
     def set_column_filter(self, col, new_filter):
-        v = self.wb.view(self.sheet)
-        filters = [f for f in v.filters if f["col"] != col]
+        sorts, filters = self._target_view(self.sheet)
+        filters = [f for f in filters if f["col"] != col]
         if new_filter:
             filters.append(new_filter)
-        self._apply_view_async(self.sheet, v.sorts, filters, "Filtering")
+        self._apply_view_async(self.sheet, sorts, filters, "Filtering")
 
     def sort_by(self, col, ascending):
-        v = self.wb.view(self.sheet)
-        self._apply_view_async(self.sheet, [(col, ascending)], v.filters, "Sorting")
+        sorts, filters = self._target_view(self.sheet)
+        self._apply_view_async(self.sheet, [(col, ascending)], filters, "Sorting")
 
     # ================================================================ formatting
 
