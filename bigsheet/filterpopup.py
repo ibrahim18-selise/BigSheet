@@ -1,12 +1,12 @@
-"""The dropdown that opens from a column header: sort, filter by condition, filter by values."""
+"""The dropdown that opens from a column header: sort, and filter by values with search."""
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from . import theme
-from .engine import FILTER_OPS, LIST_OPS, NO_VALUE_OPS, EngineError, friendly_type
+from .engine import LIST_OPS, EngineError
 
 LIMIT = 1000
 BLANK = "(Blanks)"
@@ -32,30 +32,16 @@ class FilterPopup(QFrame):
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
 
-        title = QLabel(f"<b>{col}</b>  <span style='color:{theme.TEXT_MUTED}'>{friendly_type(col_type)}</span>")
-        lay.addWidget(title)
-
-        sort_row = QHBoxLayout()
-        az = QPushButton(theme.icon("sort_az"), " Sort A to Z")
-        za = QPushButton(theme.icon("sort_za"), " Sort Z to A")
-        az.clicked.connect(lambda: self._sort(True))
-        za.clicked.connect(lambda: self._sort(False))
-        sort_row.addWidget(az)
-        sort_row.addWidget(za)
-        lay.addLayout(sort_row)
-
-        lay.addWidget(self._section("FILTER BY CONDITION"))
-        cond_row = QHBoxLayout()
-        self.op = QComboBox()
-        self.op.addItem("None", None)
-        for key, label in FILTER_OPS:
-            self.op.addItem(label, key)
-        self.value = QLineEdit()
-        self.value.setPlaceholderText("Value")
-        self.op.currentIndexChanged.connect(self._sync_condition)
-        cond_row.addWidget(self.op, 1)
-        cond_row.addWidget(self.value, 1)
-        lay.addLayout(cond_row)
+        for text, icon_name, ascending in (("Sort A to Z", "sort_az", True), ("Sort Z to A", "sort_za", False)):
+            b = QPushButton(theme.icon(icon_name), "  " + text)
+            b.setObjectName("MenuRow")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, a=ascending: self._sort(a))
+            lay.addWidget(b)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet(f"color: {theme.BORDER};")
+        lay.addWidget(line)
 
         lay.addWidget(self._section("FILTER BY VALUES"))
         self.search = QLineEdit()
@@ -96,11 +82,12 @@ class FilterPopup(QFrame):
 
         buttons = QHBoxLayout()
         clear = QPushButton("Clear filter")
-        clear.setEnabled(self.existing is not None)
+        clear.setProperty("flat", True)
+        clear.setVisible(self.existing is not None)
         clear.clicked.connect(self._clear)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.close)
-        ok = QPushButton("Apply")
+        ok = QPushButton("OK")
         ok.setProperty("primary", True)
         ok.setDefault(True)
         ok.clicked.connect(self._apply)
@@ -114,7 +101,7 @@ class FilterPopup(QFrame):
         self._timer = QTimer(self, singleShot=True, interval=300, timeout=self._load_values)
         self.search.textChanged.connect(lambda: self._timer.start())
         self._load_values()
-        self.resize(340, 520)
+        self.resize(300, 470)
 
     @staticmethod
     def _section(text):
@@ -122,18 +109,11 @@ class FilterPopup(QFrame):
         lab.setObjectName("SectionLabel")
         return lab
 
-    def _sync_condition(self):
-        op = self.op.currentData()
-        self.value.setEnabled(op is not None and op not in NO_VALUE_OPS)
-
     def _init_from_existing(self):
         f = self.existing
         self.mode = "not_in"
         self.allowed = None
-        if f and f["op"] not in LIST_OPS:
-            self.op.setCurrentIndex(max(0, self.op.findData(f["op"])))
-            self.value.setText(str(f.get("value") or ""))
-        elif f and f["op"] == "in":
+        if f and f["op"] == "in":
             self.mode = "in"
             self.allowed = set(f.get("values") or [])
             if f.get("blanks"):
@@ -143,7 +123,6 @@ class FilterPopup(QFrame):
                 self.checked[v] = False
             if not f.get("blanks"):
                 self.checked[None] = False
-        self._sync_condition()
 
     def _default_checked(self, value):
         if value in self.checked:
@@ -220,19 +199,9 @@ class FilterPopup(QFrame):
                 "blanks": None not in unchecked}
 
     def _apply(self):
-        op = self.op.currentData()
-        if op is not None:
-            new = {"col": self.col, "op": op, "value": self.value.text()}
-            if op not in NO_VALUE_OPS and not self.value.text().strip():
-                self.note.setText("Enter a value for the condition, or set the condition to None.")
-                return
-            try:
-                self.wb.validate_filter_value(self.sheet, self.col, op, new["value"])
-            except EngineError as e:
-                self.note.setText(str(e))
-                return
-        else:
-            new = self._value_filter()
+        new = self._value_filter()
+        if new is None and self.existing is not None and self.existing["op"] not in LIST_OPS:
+            new = self.existing  # keep a condition filter set from the Data menu
         self.close()
         self.window_ref.set_column_filter(self.col, new)
 
