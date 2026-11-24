@@ -298,3 +298,21 @@ def test_unreadable_rows_are_skipped_and_reported(tmpdir_path):
     note = wb.import_notes[name]
     assert note.startswith("1 row could not be read") and "150,002" in note
     wb.close()
+
+
+def test_row_and_cell_fills_follow_rows(wb):
+    wb.set_fills("sales", [2, 5], None, "#fef08a")            # two whole rows
+    wb.set_fills("sales", [3], ["city", "qty"], "#bbf7d0")     # two cells
+    f = wb.fills_for("sales", [2, 3, 5])
+    assert f[(2, "")] == "#fef08a" and f[(3, "city")] == "#bbf7d0" and f[(5, "")] == "#fef08a"
+    wb.insert_rows("sales", before_rid=0, count=1)            # everything moves down one row
+    f = wb.fills_for("sales", [3, 4, 6])
+    assert f[(3, "")] == "#fef08a" and f[(4, "qty")] == "#bbf7d0" and f[(6, "")] == "#fef08a"
+    wb.delete_positions("sales", [(0, 3)])                     # deletes the first coloured row too
+    f = wb.fills_for("sales", list(range(0, 10)))
+    assert f == {(0, "city"): "#bbf7d0", (0, "qty"): "#bbf7d0", (2, ""): "#fef08a"}
+    wb.clear_fills("sales", [0], ["qty"])
+    assert wb.fills_for("sales", [0]) == {(0, "city"): "#bbf7d0"}  # only the cleared cell lost its colour
+    wb.clear_fills("sales", None, ["city"])
+    wb.set_fills("sales", [2], None, None)
+    assert not wb.has_fills("sales")
