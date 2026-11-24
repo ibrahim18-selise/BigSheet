@@ -239,3 +239,44 @@ def test_sample_sheet():
     name = book.create_sample_sheet(rows=5000)
     assert book.row_total(name) == 5000 and len(book.columns(name)) == 7
     book.close()
+
+
+def test_uneven_csv_and_excel_title_rows(tmpdir_path):
+    import xlsxwriter
+    ragged = os.path.join(tmpdir_path, "ragged.csv")
+    with open(ragged, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([f"c{i}" for i in range(6)])
+        for r in range(3000):
+            n = 6 + (2 if r == 2500 else 0) - (2 if r % 100 == 7 else 0)
+            w.writerow([r] * n)
+    report = os.path.join(tmpdir_path, "report.xlsx")
+    book = xlsxwriter.Workbook(report)
+    ws = book.add_worksheet("Report")
+    ws.write(0, 0, "Sales report")
+    ws.write_row(2, 0, ["Region", "Amount", "Units"])
+    for r in range(3, 103):
+        ws.write_row(r, 0, [f"R{r % 4}", r * 2.5, r])
+    book.close()
+    wb = Workbook()
+    a = wb.import_file(ragged)[0]
+    assert len(wb.columns(a)) == 6 and wb.row_total(a) == 3000
+    b = wb.import_file(report, {"header": True})[0]
+    assert dict(wb.columns(b)) == {"Region": "VARCHAR", "Amount": "DOUBLE", "Units": "BIGINT"}
+    assert wb.row_total(b) == 100
+    wb.close()
+
+
+def test_local_number_and_date_formats(wb):
+    from bigsheet.engine import normalize_value
+    assert normalize_value("DOUBLE", "1.234,50") == "1234.5"
+    assert normalize_value("DOUBLE", "\u20ac 1,234.50") == "1234.5"
+    assert normalize_value("BIGINT", "1,234") == "1234"
+    assert normalize_value("DOUBLE", "12%") == "0.12"
+    assert normalize_value("DATE", "31.01.2024") == "2024-01-31"
+    assert normalize_value("DATE", "01/31/2024") == "2024-01-31"
+    wb.validate_filter_value("sales", "price", "gt", "1.000,00")
+    t, c = wb.prepare_view("sales", [], [{"col": "order date", "op": "ge", "value": "28.01.2024"}])
+    assert c > 0
+    wb.set_cells("sales", "price", [0], ["1.234,50"])
+    assert wb.fetch("sales", 0, 1)[1][0][2] == 1234.5
