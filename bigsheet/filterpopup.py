@@ -25,7 +25,6 @@ class FilterPopup(QFrame):
         else:
             self.filters = self.wb.view(sheet).filters
         self.existing = next((f for f in self.filters if f["col"] == col), None)
-        self.checked = {}       # value text (or None for blanks) -> checked
         self.truncated = False
 
         lay = QVBoxLayout(self)
@@ -110,26 +109,29 @@ class FilterPopup(QFrame):
         return lab
 
     def _init_from_existing(self):
+        """Selection model: every value is ticked when base is True, except those in exceptions
+        (and the other way round when base is False). This covers values not shown in the list."""
         f = self.existing
-        self.mode = "not_in"
-        self.allowed = None
+        self.base = True
+        self.exceptions = set()
         if f and f["op"] == "in":
-            self.mode = "in"
-            self.allowed = set(f.get("values") or [])
+            self.base = False
+            self.exceptions = set(f.get("values") or [])
             if f.get("blanks"):
-                self.allowed.add(None)
+                self.exceptions.add(None)
         elif f and f["op"] == "not_in":
-            for v in f.get("values") or []:
-                self.checked[v] = False
+            self.exceptions = set(f.get("values") or [])
             if not f.get("blanks"):
-                self.checked[None] = False
+                self.exceptions.add(None)
 
     def _default_checked(self, value):
-        if value in self.checked:
-            return self.checked[value]
-        if self.allowed is not None:
-            return value in self.allowed
-        return True
+        return self.base != (value in self.exceptions)
+
+    def _set_checked(self, value, on):
+        if on == self.base:
+            self.exceptions.discard(value)
+        else:
+            self.exceptions.add(value)
 
     def _load_values(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -158,48 +160,39 @@ class FilterPopup(QFrame):
 
     def _item_changed(self, item, column):
         if column == 0:
-            self.checked[item.data(0, Qt.UserRole)] = item.checkState(0) == Qt.Checked
+            self._set_checked(item.data(0, Qt.UserRole), item.checkState(0) == Qt.Checked)
 
     def _set_all(self, on):
+        if self.search.text().strip():
+            # Only the values found by the search.
+            for i in range(self.tree.topLevelItemCount()):
+                self._set_checked(self.tree.topLevelItem(i).data(0, Qt.UserRole), on)
+        else:
+            # Every value in the column, including those not listed.
+            self.base = on
+            self.exceptions = set()
         self.tree.blockSignals(True)
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
-            item.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
-            self.checked[item.data(0, Qt.UserRole)] = on
+            item.setCheckState(0, Qt.Checked if self._default_checked(item.data(0, Qt.UserRole)) else Qt.Unchecked)
         self.tree.blockSignals(False)
-        if on and not self.search.text():
-            self.checked = {}
-            self.allowed = None
-            self.mode = "not_in"
 
     def _value_filter(self):
-        """The filter implied by the checkboxes, or None when everything is checked."""
-        loaded = [self.tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(self.tree.topLevelItemCount())]
-        if self.allowed is not None:
-            allowed = set(self.allowed)
-            for v, on in self.checked.items():
-                if on:
-                    allowed.add(v)
-                else:
-                    allowed.discard(v)
-            if not self.search.text() and not self.truncated and allowed >= set(loaded):
+        """The filter for the current ticks: None when every value is ticked."""
+        if self.base:
+            if not self.exceptions:
                 return None
-            return {"col": self.col, "op": "in", "values": sorted(v for v in allowed if v is not None),
-                    "blanks": None in allowed}
-        unchecked = {v for v, on in self.checked.items() if not on}
-        if not unchecked:
-            return None
-        complete = not self.search.text() and not self.truncated
-        if complete:
-            kept = [v for v in loaded if v not in unchecked]
-            if len(kept) < len(unchecked):
-                return {"col": self.col, "op": "in", "values": [v for v in kept if v is not None],
-                        "blanks": None in kept}
-        return {"col": self.col, "op": "not_in", "values": sorted(v for v in unchecked if v is not None),
-                "blanks": None not in unchecked}
+            return {"col": self.col, "op": "not_in",
+                    "values": sorted(v for v in self.exceptions if v is not None),
+                    "blanks": None not in self.exceptions}
+        return {"col": self.col, "op": "in", "values": sorted(v for v in self.exceptions if v is not None),
+                "blanks": None in self.exceptions}
 
     def _apply(self):
         new = self._value_filter()
+        if new is not None and new["op"] == "in" and not new["values"] and not new["blanks"]:
+            self.note.setText("Tick at least one value, or click Select all.")
+            return
         if new is None and self.existing is not None and self.existing["op"] not in LIST_OPS:
             new = self.existing  # keep a condition filter set from the Data menu
         self.close()
